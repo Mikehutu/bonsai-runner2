@@ -62,6 +62,8 @@ Running `start.sh` or `start.ps1` with no arguments automatically inspects your 
 - **Apple Silicon Mac (8 GB RAM)** → picks **`ptq1-mtp`** (6.23 GB) + auto-tunes **8K context**, `KV4=1`, and CPU vision offload.
 - **Linux / Windows Vulkan or CPU** → picks **`pq2-mtp`** (7.49 GB) when RAM ≥ 12 GB, or **`ptq1-mtp`** (6.23 GB) + 8K context + `KV4=1` on tighter machines.
 
+> 📊 **Expected speeds & KV sizing for your exact GPU/Mac/laptop:** see **[HARDWARE-GUIDE.md](HARDWARE-GUIDE.md)** (exact GGUF-derived KV tables + theoretical & measured tok/s for RTX 30/40/50 desktop GPUs, gaming laptops, Apple Silicon MacBooks, and iGPUs).
+
 ---
 
 ## Variants
