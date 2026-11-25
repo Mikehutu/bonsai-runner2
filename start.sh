@@ -53,8 +53,26 @@ load_dotenv() {
 load_dotenv "${SCRIPT_DIR}/.env"
 
 # ─── Configuration ────────────────────────────────────────────────────
-RAW_VARIANT="${1:-}"
+CHOOSE_MODE=0
+RAW_VARIANT=""
+for arg in "$@"; do
+  case "${arg}" in
+    --choose|-i|--interactive) CHOOSE_MODE=1 ;;
+    -h|--help|help) RAW_VARIANT="--help" ;;
+    *)
+      if [[ -z "${RAW_VARIANT}" ]]; then
+        RAW_VARIANT="${arg}"
+      fi
+      ;;
+  esac
+done
 MODEL_VARIANT="${RAW_VARIANT:-${MODEL_VARIANT:-auto}}"
+
+# Track whether user explicitly set memory-tuning overrides
+USER_SET_MMPROJ_CPU=0
+USER_SET_KV4=0
+[[ -n "${MMPROJ_CPU+x}" ]] && USER_SET_MMPROJ_CPU=1
+[[ -n "${KV4+x}" ]] && USER_SET_KV4=1
 
 HF_REPO_GGUF="prism-ml/Ternary-Bonsai-2.5-27B-GGUF"
 HF_REPO_MLX="prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit"
@@ -131,11 +149,13 @@ Environment variables (or set in .env):
   HF_HUB_OFFLINE=0        Set 1 for airgapped machines with pre-cached models
 
 Examples:
-  bash start.sh
-  bash start.sh ptq1-mtp
+  bash start.sh                  # auto-detect hardware, pick optimal variant & start immediately
+  bash start.sh --choose         # interactive menu to pick variant & context size
+  bash start.sh ptq1-mtp         # explicit variant (skip auto-pick)
   CONTEXT_SIZE=131072 KV4=1 bash start.sh pq2-mtp
   MODE=instruct PORT=9090 bash start.sh ptq1-mtp
-  bash stop.sh
+  bash test-model.sh             # verify chat + tool calling + measure tok/s
+  bash stop.sh                   # stop the running server
 EOF
 }
 
@@ -422,96 +442,78 @@ else
   fi
 fi
 
-# Determine recommended variant for this hardware
-recommend_variant() {
-  if [[ "${BACKEND}" == "cuda" || "${BACKEND}" == "rocm" ]]; then
-    echo "ptq1-mtp"
-  elif [[ "${BACKEND}" == "metal" ]]; then
-    # PQ2_0 is benchmarked on Apple Metal; fall back to smaller PTQ1_0 on 8 GB Macs
-    if [[ "${TOTAL_RAM_MB}" -gt 0 && "${TOTAL_RAM_MB}" -lt 12000 ]]; then
-      echo "ptq1-mtp"
-    else
-      echo "pq2-mtp"
-    fi
+# Determine recommended variant and hardware-aware tuning reason
+RECOMMENDED_VARIANT=""
+AUTO_REASON=""
+if [[ "${BACKEND}" == "cuda" ]]; then
+  RECOMMENDED_VARIANT="ptq1-mtp"
+  if [[ "${TOTAL_VRAM_MB}" -gt 0 && "${TOTAL_VRAM_MB}" -le 9000 ]]; then
+    AUTO_REASON="CUDA <=9GB VRAM (${TOTAL_VRAM_MB} MB): smallest PTQ1_0-mtp + 16K ctx + KV4 + CPU mmproj"
+  elif [[ "${TOTAL_VRAM_MB}" -gt 0 ]]; then
+    AUTO_REASON="CUDA (${TOTAL_VRAM_MB} MB VRAM): PTQ1_0-mtp is fastest decode on NVIDIA + built-in MTP"
   else
-    # CPU / Vulkan: PQ2_0-mtp if >= 12 GB RAM, else tighter PTQ1_0-mtp
-    if [[ "${TOTAL_RAM_MB}" -gt 0 && "${TOTAL_RAM_MB}" -lt 12000 ]]; then
-      echo "ptq1-mtp"
-    else
-      echo "pq2-mtp"
-    fi
+    AUTO_REASON="CUDA (unified memory): PTQ1_0-mtp is fastest decode on NVIDIA + built-in MTP"
   fi
-}
-
-RECOMMENDED_VARIANT="$(recommend_variant)"
-
-# Interactive hardware summary & selection when invoked with no argument
-if [[ -z "${RAW_VARIANT}" ]]; then
-  echo "══════════════════════════════════════════════════════════"
-  echo "  Ternary Bonsai 2.5 27B Runner"
-  echo "══════════════════════════════════════════════════════════"
-  echo "── Hardware Detection ──"
-  echo "   OS / Arch:  ${OS_NAME} (${ARCH_TAG})"
-  echo "   Backend:    ${BACKEND}${CUDA_TAG:+ (CUDA ${CUDA_TAG})}"
-  [[ "${TOTAL_RAM_MB}" -gt 0 ]] && echo "   System RAM: ${TOTAL_RAM_MB} MB"
-  if [[ "${BACKEND}" == "cuda" ]]; then
-    if [[ "${TOTAL_VRAM_MB}" -gt 0 ]]; then
-      echo "   GPU VRAM:   ${TOTAL_VRAM_MB} MB"
-    else
-      echo "   GPU VRAM:   unified / not separately reported"
-    fi
-  fi
-  echo ""
-  echo "── Variants (Ternary Bonsai 2.5 27B) ──"
-  echo "   ptq1-mtp  6.23 GB — PTQ1_0 + built-in MTP head (fastest on NVIDIA CUDA, smallest MTP)"
-  echo "   pq2-mtp   7.49 GB — PQ2_0  + built-in MTP head (benchmarked on Apple Metal, great for CPU/Vulkan)"
-  echo "   q2-mtp    7.91 GB — Q2_0   + built-in MTP head (also compatible with stock llama.cpp b11556+)"
-  echo "   ptq1      5.99 GB — PTQ1_0 base (no MTP head, smallest footprint)"
-  echo "   pq2       7.25 GB — PQ2_0  base (no MTP head)"
-  echo "   q2        7.67 GB — Q2_0   base (no MTP head)"
-  if [[ "${OS_NAME}" == "Darwin" && "${ARCH_TAG}" == "arm64" ]]; then
-    echo "   mlx       ~8.6 GB — Apple Silicon MLX 2-bit pack (text + vision Python runner)"
-  fi
-  echo ""
-  echo "   Recommended for your machine: ${RECOMMENDED_VARIANT}"
-
-  # Context estimate
-  if [[ "${TOTAL_RAM_MB}" -gt 0 ]]; then
-    local_ref_mb=7490
-    [[ "${RECOMMENDED_VARIANT}" == "ptq1-mtp" ]] && local_ref_mb=6230
-    avail_mb=$((TOTAL_RAM_MB - local_ref_mb - 1536))
-    if [[ "${avail_mb}" -gt 0 ]]; then
-      max_ctx_k=$((avail_mb / 8))
-      [[ "${max_ctx_k}" -gt 262 ]] && max_ctx_k=262
-      echo "   Estimated max context: ~${max_ctx_k}K tokens (default starts at safe 32K)"
-    else
-      echo "   ⚠  RAM is tight for a 27B model — consider CONTEXT_SIZE=8192 and NO_VISION=1"
-    fi
-  fi
-  echo ""
-
-  if [[ -t 0 && "${NON_INTERACTIVE}" != "1" && "${DRY_RUN}" != "1" ]]; then
-    read -r -p "Choose variant [ptq1-mtp/pq2-mtp/q2-mtp/ptq1/pq2/q2] (default: ${RECOMMENDED_VARIANT}): " CHOSEN
-    if [[ -n "${CHOSEN}" ]]; then
-      MODEL_VARIANT="${CHOSEN}"
-    else
-      MODEL_VARIANT="${RECOMMENDED_VARIANT}"
-    fi
-    resolve_variant "${MODEL_VARIANT}"
-
-    if [[ "${IS_MLX}" == "0" && "${CONTEXT_SIZE}" == "0" ]]; then
-      read -r -p "Context size [0=32K safe / 65536 / 131072 / 262144] (default: 0): " CTX_CHOSEN
-      if [[ -n "${CTX_CHOSEN}" ]]; then
-        CONTEXT_SIZE="${CTX_CHOSEN}"
-      fi
-    fi
+elif [[ "${BACKEND}" == "rocm" ]]; then
+  RECOMMENDED_VARIANT="ptq1-mtp"
+  AUTO_REASON="AMD ROCm: PTQ1_0-mtp + built-in MTP"
+elif [[ "${BACKEND}" == "metal" ]]; then
+  if [[ "${TOTAL_RAM_MB}" -gt 0 && "${TOTAL_RAM_MB}" -lt 14000 ]]; then
+    RECOMMENDED_VARIANT="ptq1-mtp"
+    AUTO_REASON="Apple Silicon tight RAM (${TOTAL_RAM_MB} MB): smallest PTQ1_0-mtp + 8K ctx + KV4 + CPU mmproj"
   else
-    MODEL_VARIANT="${RECOMMENDED_VARIANT}"
-    resolve_variant "${MODEL_VARIANT}"
+    RECOMMENDED_VARIANT="pq2-mtp"
+    AUTO_REASON="Apple Silicon Metal (${TOTAL_RAM_MB} MB RAM): PQ2_0-mtp is PrismML's benchmarked Metal packing"
+  fi
+else
+  if [[ "${TOTAL_RAM_MB}" -gt 0 && "${TOTAL_RAM_MB}" -lt 12000 ]]; then
+    RECOMMENDED_VARIANT="ptq1-mtp"
+    AUTO_REASON="${BACKEND} tight RAM (${TOTAL_RAM_MB} MB): smallest PTQ1_0-mtp + 8K ctx + KV4"
+  else
+    RECOMMENDED_VARIANT="pq2-mtp"
+    AUTO_REASON="${BACKEND} (${TOTAL_RAM_MB} MB RAM): PQ2_0-mtp for smooth unpacking and strong prefill"
   fi
 fi
 
-# Resolve 'auto' when passed explicitly as `bash start.sh auto`
+# Interactive menu only when --choose is explicitly requested
+if [[ "${CHOOSE_MODE}" == "1" && -t 0 && "${NON_INTERACTIVE}" != "1" && "${DRY_RUN}" != "1" ]]; then
+  echo "══════════════════════════════════════════════════════════"
+  echo "  Ternary Bonsai 2.5 27B Runner — Interactive Setup"
+  echo "══════════════════════════════════════════════════════════"
+  echo "   OS / Arch:   ${OS_NAME} (${ARCH_TAG})"
+  echo "   Backend:     ${BACKEND}${CUDA_TAG:+ (CUDA ${CUDA_TAG})}"
+  [[ "${TOTAL_RAM_MB}" -gt 0 ]] && echo "   System RAM:  ${TOTAL_RAM_MB} MB"
+  [[ "${BACKEND}" == "cuda" && "${TOTAL_VRAM_MB}" -gt 0 ]] && echo "   GPU VRAM:    ${TOTAL_VRAM_MB} MB"
+  echo ""
+  echo "   ptq1-mtp  6.23 GB — PTQ1_0 + MTP head (fastest on NVIDIA CUDA, smallest MTP)"
+  echo "   pq2-mtp   7.49 GB — PQ2_0  + MTP head (benchmarked on Apple Metal, great for CPU/Vulkan)"
+  echo "   q2-mtp    7.91 GB — Q2_0   + MTP head (stock llama.cpp b11556+ compatible)"
+  echo "   ptq1      5.99 GB — PTQ1_0 base (no MTP head)"
+  echo "   pq2       7.25 GB — PQ2_0  base (no MTP head)"
+  echo "   q2        7.67 GB — Q2_0   base (no MTP head)"
+  if [[ "${OS_NAME}" == "Darwin" && "${ARCH_TAG}" == "arm64" ]]; then
+    echo "   mlx       ~8.6 GB — Apple Silicon MLX 2-bit pack"
+  fi
+  echo ""
+  echo "   Auto-recommended: ${RECOMMENDED_VARIANT} (${AUTO_REASON})"
+  echo ""
+  read -r -p "Choose variant [ptq1-mtp/pq2-mtp/q2-mtp/ptq1/pq2/q2] (default: ${RECOMMENDED_VARIANT}): " CHOSEN
+  if [[ -n "${CHOSEN}" ]]; then
+    MODEL_VARIANT="${CHOSEN}"
+  else
+    MODEL_VARIANT="${RECOMMENDED_VARIANT}"
+  fi
+  resolve_variant "${MODEL_VARIANT}"
+
+  if [[ "${IS_MLX}" == "0" && "${CONTEXT_SIZE}" == "0" ]]; then
+    read -r -p "Context size [0=auto / 16384 / 32768 / 65536 / 131072 / 262144] (default: 0): " CTX_CHOSEN
+    if [[ -n "${CTX_CHOSEN}" ]]; then
+      CONTEXT_SIZE="${CTX_CHOSEN}"
+    fi
+  fi
+fi
+
+# Resolve 'auto' (default zero-prompt path)
 if [[ "${VARIANT_KEY}" == "auto" ]]; then
   MODEL_VARIANT="${RECOMMENDED_VARIANT}"
   resolve_variant "${MODEL_VARIANT}"
@@ -625,8 +627,23 @@ else
   fi
 fi
 
-# Resolve effective context, GPU layers, and MTP flags
+# Resolve hardware-aware context, VRAM safeguards, GPU layers, and MTP flags
 CTX_VALUE="${CONTEXT_SIZE}"
+if [[ "${BACKEND}" == "cuda" && "${TOTAL_VRAM_MB}" -gt 0 && "${TOTAL_VRAM_MB}" -le 9000 ]]; then
+  # 8 GB VRAM GPU: fit PTQ1_0 + KV4 + 16K context comfortably by keeping mmproj in system RAM
+  [[ "${CTX_VALUE}" == "0" ]] && CTX_VALUE=16384
+  [[ "${USER_SET_MMPROJ_CPU}" == "0" ]] && MMPROJ_CPU=1
+  [[ "${USER_SET_KV4}" == "0" ]] && KV4=1
+elif [[ "${BACKEND}" == "metal" && "${TOTAL_RAM_MB}" -gt 0 && "${TOTAL_RAM_MB}" -lt 14000 ]]; then
+  # 8 GB Apple Silicon Mac: conservative 8K context + KV4 + CPU mmproj
+  [[ "${CTX_VALUE}" == "0" ]] && CTX_VALUE=8192
+  [[ "${USER_SET_MMPROJ_CPU}" == "0" ]] && MMPROJ_CPU=1
+  [[ "${USER_SET_KV4}" == "0" ]] && KV4=1
+elif [[ "${BACKEND}" != "cuda" && "${BACKEND}" != "rocm" && "${TOTAL_RAM_MB}" -gt 0 && "${TOTAL_RAM_MB}" -lt 12000 ]]; then
+  # Tight-RAM CPU/Vulkan host
+  [[ "${CTX_VALUE}" == "0" ]] && CTX_VALUE=8192
+  [[ "${USER_SET_KV4}" == "0" ]] && KV4=1
+fi
 if [[ "${CTX_VALUE}" == "0" ]]; then
   CTX_VALUE=32768
 fi
@@ -668,10 +685,14 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   echo "  ARCH=${ARCH_TAG}"
   echo "  BACKEND=${BACKEND}"
   echo "  CUDA_TAG=${CUDA_TAG}"
+  echo "  VRAM_MB=${TOTAL_VRAM_MB}"
+  echo "  RAM_MB=${TOTAL_RAM_MB}"
   echo "  VARIANT=${VARIANT_KEY}"
+  echo "  AUTO_REASON=${AUTO_REASON}"
   echo "  HF_REPO=${HF_REPO_GGUF}"
   echo "  MODEL_FILE=${MODEL_FILE}"
   echo "  MMPROJ_FILE=${MMPROJ_FILE}"
+  echo "  MMPROJ_CPU=${MMPROJ_CPU}"
   echo "  RELEASE_TAG=${RELEASE_TAG}"
   echo "  PREBUILT_ASSET=${PREBUILT_ASSET}"
   echo "  NEEDS_SOURCE_BUILD=${NEEDS_SOURCE_BUILD}"
@@ -686,10 +707,15 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
+HW_LINE="${OS_NAME}/${ARCH_TAG} · ${BACKEND}${CUDA_TAG:+ (CUDA ${CUDA_TAG})}"
+[[ "${TOTAL_VRAM_MB}" -gt 0 ]] && HW_LINE="${HW_LINE} · ${TOTAL_VRAM_MB} MB VRAM"
+[[ "${TOTAL_RAM_MB}" -gt 0 ]] && HW_LINE="${HW_LINE} · ${TOTAL_RAM_MB} MB RAM"
+
 echo "══════════════════════════════════════════════════════════"
 echo "  Ternary Bonsai 2.5 27B Runner"
 echo "  Variant:    ${VARIANT_KEY} (${MODEL_SIZE_HINT})"
-echo "  Backend:    ${BACKEND}${CUDA_TAG:+ (CUDA ${CUDA_TAG})} on ${OS_NAME}/${ARCH_TAG}"
+echo "  Hardware:   ${HW_LINE}"
+[[ -n "${AUTO_REASON}" ]] && echo "  Auto-pick:  ${AUTO_REASON}"
 echo "  Mode:       ${MODE}"
 if [[ "${MTP_ENABLED}" == "1" ]]; then
   echo "  MTP Draft:  ON (n-max=${EFF_MTP_NMAX}, p-min=${EFF_MTP_PMIN})"
@@ -1037,8 +1063,10 @@ echo "   Parallel:  ${PARALLEL} (1 = single-slot low VRAM, 0 = auto)"
 echo "   GPU layers:${EFF_NGL} (backend: ${BACKEND})"
 [[ "${MTP_ENABLED}" == "1" ]] && echo "   MTP:       enabled (n-max=${EFF_MTP_NMAX}, p-min=${EFF_MTP_PMIN})"
 [[ "${KV4}" == "1" ]] && echo "   KV Cache:  Q4_0 (4-bit)"
+[[ "${MMPROJ_CPU}" == "1" && -n "${MMPROJ_PATH}" ]] && echo "   Vision RAM: projector kept in system RAM (--no-mmproj-offload)"
 echo ""
-echo "   Press Ctrl+C to stop, or run: bash stop.sh"
+echo "   Test it:   PORT=${FINAL_PORT} bash test-model.sh"
+echo "   Stop it:   Press Ctrl+C or run: bash stop.sh"
 echo ""
 
 mkdir -p "$(dirname "${PID_FILE}")"

@@ -9,12 +9,13 @@ function Check($haystack, $needle, $msg) {
     if ($haystack -and $haystack.Contains($needle)) { Pass $msg } else { Fail "$msg (missing '$needle')" }
 }
 
-$startPs1 = Join-Path $PSScriptRoot "start.ps1"
-$stopPs1  = Join-Path $PSScriptRoot "stop.ps1"
+$startPs1     = Join-Path $PSScriptRoot "start.ps1"
+$stopPs1      = Join-Path $PSScriptRoot "stop.ps1"
+$testModelPs1 = Join-Path $PSScriptRoot "test-model.ps1"
 
 Write-Host ""
 Write-Host "=== 1. PowerShell AST Syntax Parse ==="
-foreach ($scriptPath in @($startPs1, $stopPs1)) {
+foreach ($scriptPath in @($startPs1, $stopPs1, $testModelPs1)) {
     $tokens = $null
     $errors = $null
     [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors) | Out-Null
@@ -57,6 +58,18 @@ Check $outCuda12 "VARIANT=ptq1-mtp" "Win x64 CUDA: auto picks ptq1-mtp"
 Check $outCuda12 "PREBUILT_ASSET=llama-prism-b12178-03ec600-bin-win-cuda-12.4-x64.zip" "Win x64 CUDA 12.4: binary asset"
 Check $outCuda12 "CUDART_ASSET=cudart-llama-bin-win-cuda-12.4-x64.zip" "Win x64 CUDA 12.4: cudart DLL asset"
 Check $outCuda12 "MTP_ENABLED=True" "Win x64 CUDA: MTP auto-enabled"
+
+# 3b2. Windows x64 CUDA 8 GB VRAM (RTX 4060 / 3070 -> auto safe tuning)
+$env:BONSAI_TEST_ARCH = "AMD64"
+$env:BONSAI_TEST_BACKEND = "cuda"
+$env:BONSAI_TEST_CUDA_VER = "12.4"
+$env:BONSAI_TEST_VRAM_MB = "8192"
+$outCuda8g = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startPs1 -DryRun 2>&1 | Out-String)
+Check $outCuda8g "VARIANT=ptq1-mtp" "Win CUDA 8GB VRAM: auto picks ptq1-mtp"
+Check $outCuda8g "CTX_VALUE=16384"  "Win CUDA 8GB VRAM: auto-tunes 16K context"
+Check $outCuda8g "MMPROJ_CPU=True"  "Win CUDA 8GB VRAM: keeps mmproj in system RAM"
+Check $outCuda8g "KV4=True"         "Win CUDA 8GB VRAM: auto-enables 4-bit KV cache"
+Remove-Item Env:BONSAI_TEST_VRAM_MB -ErrorAction SilentlyContinue
 
 # 3c. Windows x64 CUDA 13.3
 $env:BONSAI_TEST_CUDA_VER = "13.3"

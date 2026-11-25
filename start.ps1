@@ -24,6 +24,7 @@ param(
     [switch]$NoVision,
     [switch]$MmprojCpu,
     [switch]$Kv4,
+    [switch]$Choose,
     [switch]$Detached,
     [switch]$NonInteractive,
     [switch]$DryRun,
@@ -126,6 +127,8 @@ if ($MmprojQuant -eq "") {
 if ($ImageMaxTokens -lt 0) {
     if ($env:IMAGE_MAX_TOKENS) { $ImageMaxTokens = [int]$env:IMAGE_MAX_TOKENS } else { $ImageMaxTokens = 1024 }
 }
+$userSetMmprojCpu = $MmprojCpu.IsPresent -or ($null -ne $env:MMPROJ_CPU)
+$userSetKv4       = $Kv4.IsPresent       -or ($null -ne $env:KV4)
 if (-not $NoVision -and $env:NO_VISION -eq "1") { $NoVision = $true }
 if (-not $MmprojCpu -and $env:MMPROJ_CPU -eq "1") { $MmprojCpu = $true }
 if (-not $Kv4 -and $env:KV4 -eq "1") { $Kv4 = $true }
@@ -184,12 +187,34 @@ $archRaw = if ($env:BONSAI_TEST_ARCH) { $env:BONSAI_TEST_ARCH } else { $env:PROC
 $archSuffix = if ($archRaw -match "ARM64") { "arm64" } else { "x64" }
 
 $totalRamMB = 0
-try {
-    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
-    if ($cs -and $cs.TotalPhysicalMemory) {
-        $totalRamMB = [int][math]::Floor($cs.TotalPhysicalMemory / 1MB)
+if ($env:BONSAI_TEST_RAM_MB) {
+    $totalRamMB = [int]$env:BONSAI_TEST_RAM_MB
+} else {
+    try {
+        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+        if ($cs -and $cs.TotalPhysicalMemory) {
+            $totalRamMB = [int][math]::Floor($cs.TotalPhysicalMemory / 1MB)
+        }
+    } catch {}
+}
+
+function Detect-NvidiaVramMB {
+    if ($env:BONSAI_TEST_VRAM_MB) { return [int]$env:BONSAI_TEST_VRAM_MB }
+    $nvsmiPaths = @(
+        "nvidia-smi.exe",
+        "$env:SystemRoot\System32\nvidia-smi.exe",
+        "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
+    )
+    foreach ($p in $nvsmiPaths) {
+        try {
+            $out = & $p --query-gpu=memory.total --format=csv,noheader,nounits 2>&1 | Select-Object -First 1
+            if ($out -and ($out.ToString().Trim() -match '^\d+$')) {
+                return [int]$out.ToString().Trim()
+            }
+        } catch {}
     }
-} catch {}
+    return 0
+}
 
 function Detect-CudaTag {
     if ($env:BONSAI_TEST_CUDA_VER) {
@@ -276,13 +301,51 @@ if ($archSuffix -eq "arm64" -and $Backend -in @("hip", "vulkan")) {
     $Backend = "cpu"
 }
 
-# Recommend variant
-$recommended = if ($Backend -in @("cuda", "hip")) {
-    "ptq1-mtp"
+# Detect VRAM on CUDA & recommend optimal variant + memory tuning
+$totalVramMB = if ($Backend -eq "cuda") { Detect-NvidiaVramMB } else { 0 }
+
+$autoReason = ""
+$recommended = ""
+if ($Backend -eq "cuda") {
+    $recommended = "ptq1-mtp"
+    if ($totalVramMB -gt 0 -and $totalVramMB -le 9000) {
+        $autoReason = "CUDA <=9GB VRAM ($totalVramMB MB): smallest PTQ1_0-mtp + 16K ctx + KV4 + CPU mmproj"
+    } elseif ($totalVramMB -gt 0) {
+        $autoReason = "CUDA ($totalVramMB MB VRAM): PTQ1_0-mtp is fastest decode on NVIDIA + built-in MTP"
+    } else {
+        $autoReason = "CUDA: PTQ1_0-mtp is fastest decode on NVIDIA + built-in MTP"
+    }
+} elseif ($Backend -eq "hip") {
+    $recommended = "ptq1-mtp"
+    $autoReason = "AMD HIP: PTQ1_0-mtp + built-in MTP"
 } elseif ($totalRamMB -gt 0 -and $totalRamMB -lt 12000) {
-    "ptq1-mtp"
+    $recommended = "ptq1-mtp"
+    $autoReason = "$Backend tight RAM ($totalRamMB MB): smallest PTQ1_0-mtp + 8K ctx + KV4"
 } else {
-    "pq2-mtp"
+    $recommended = "pq2-mtp"
+    $autoReason = "$Backend ($totalRamMB MB RAM): PQ2_0-mtp for smooth unpacking and strong prefill"
+}
+
+if ($Choose -and -not $NonInteractive -and -not $DryRun) {
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host "  Ternary Bonsai 2.5 27B Runner — Interactive Setup" -ForegroundColor Cyan
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host "   Backend:    $Backend$(if ($cudaTag) { " (CUDA $cudaTag)" })"
+    if ($totalVramMB -gt 0) { Write-Host "   GPU VRAM:   $totalVramMB MB" }
+    if ($totalRamMB -gt 0)  { Write-Host "   System RAM: $totalRamMB MB" }
+    Write-Host "   Auto-pick:  $recommended ($autoReason)"
+    Write-Host ""
+    Write-Host "   Variants: ptq1-mtp (6.23 GB), pq2-mtp (7.49 GB), q2-mtp (7.91 GB), ptq1, pq2, q2"
+    $picked = Read-Host "Choose variant (Enter for $recommended)"
+    if ($picked -and $picked.Trim() -ne "") {
+        $Variant = $picked.Trim().ToLowerInvariant()
+        if (-not $VARIANTS.ContainsKey($Variant)) {
+            Write-Host "[ERR] Unknown variant '$Variant'." -ForegroundColor Red
+            exit 1
+        }
+    } else {
+        $Variant = $recommended
+    }
 }
 
 if ($Variant -eq "auto") {
@@ -327,7 +390,16 @@ function Get-AssetNames($be, $cTag, $arch, $tag) {
 }
 
 $assets = Get-AssetNames $Backend $cudaTag $archSuffix $relTag
-$effCtx = if ($ContextSize -eq 0) { 32768 } else { $ContextSize }
+$effCtx = $ContextSize
+if ($Backend -eq "cuda" -and $totalVramMB -gt 0 -and $totalVramMB -le 9000) {
+    if ($effCtx -eq 0) { $effCtx = 16384 }
+    if (-not $userSetMmprojCpu) { $MmprojCpu = $true }
+    if (-not $userSetKv4) { $Kv4 = $true }
+} elseif ($Backend -notin @("cuda", "hip") -and $totalRamMB -gt 0 -and $totalRamMB -lt 12000) {
+    if ($effCtx -eq 0) { $effCtx = 8192 }
+    if (-not $userSetKv4) { $Kv4 = $true }
+}
+if ($effCtx -eq 0) { $effCtx = 32768 }
 $effNgl = if ($Backend -eq "cpu") { 0 } else { $Ngl }
 
 $mtpEnabled = $false
@@ -345,10 +417,14 @@ if ($DryRun) {
     Write-Host "  ARCH=$archSuffix"
     Write-Host "  BACKEND=$Backend"
     Write-Host "  CUDA_TAG=$cudaTag"
+    Write-Host "  VRAM_MB=$totalVramMB"
+    Write-Host "  RAM_MB=$totalRamMB"
     Write-Host "  VARIANT=$Variant"
+    Write-Host "  AUTO_REASON=$autoReason"
     Write-Host "  HF_REPO=$HF_REPO"
     Write-Host "  MODEL_FILE=$modelFile"
     Write-Host "  MMPROJ_FILE=$mmprojFile"
+    Write-Host "  MMPROJ_CPU=$MmprojCpu"
     Write-Host "  RELEASE_TAG=$relTag"
     Write-Host "  PREBUILT_ASSET=$($assets.Main)"
     Write-Host "  CUDART_ASSET=$($assets.Cudart)"
@@ -368,7 +444,9 @@ Write-Host "  Ternary Bonsai 2.5 27B Runner (Windows)" -ForegroundColor Cyan
 Write-Host "  Variant:    $Variant ($modelHint)"
 Write-Host "  Backend:    $Backend$(if ($cudaTag) { " (CUDA $cudaTag)" }) on Windows/$archSuffix"
 if ($gpuStr) { Write-Host "  GPU(s):     $gpuStr" }
+if ($totalVramMB -gt 0) { Write-Host "  GPU VRAM:   $totalVramMB MB" }
 if ($totalRamMB -gt 0) { Write-Host "  System RAM: $totalRamMB MB" }
+if ($autoReason) { Write-Host "  Auto-pick:  $autoReason" }
 Write-Host "  Mode:       $Mode"
 if ($mtpEnabled) {
     Write-Host "  MTP Draft:  ON (n-max=$effMtpNmax, p-min=$effMtpPmin)"
@@ -631,7 +709,10 @@ Write-Host "   Web UI:    http://localhost:$finalPort" -ForegroundColor Green
 Write-Host "   API:       http://$HostAddr`:$finalPort/v1/chat/completions"
 Write-Host "   Backend:   $Backend  Context: $effCtx tokens  Parallel: $Parallel"
 if ($mtpEnabled) { Write-Host "   MTP:       enabled (n-max=$effMtpNmax, p-min=$effMtpPmin)" }
-Write-Host "   Stop:      Ctrl+C or powershell -ExecutionPolicy Bypass -File stop.ps1"
+if ($Kv4)        { Write-Host "   KV Cache:  Q4_0 (4-bit)" }
+if ($MmprojCpu -and $mmprojPath -ne "") { Write-Host "   Vision RAM: projector kept in system RAM (--no-mmproj-offload)" }
+Write-Host "   Test it:   powershell -ExecutionPolicy Bypass -File test-model.ps1 -Port $finalPort"
+Write-Host "   Stop it:   Ctrl+C or powershell -ExecutionPolicy Bypass -File stop.ps1"
 Write-Host ""
 
 # Quote any argument with spaces or JSON quotes for Start-Process

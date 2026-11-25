@@ -16,10 +16,14 @@ No cloud API. No subscription. No compiler or Python needed for GGUF serving —
 git clone https://github.com/Mikehutu/bonsai-runner2
 cd bonsai-runner2
 
-# Auto-detect hardware and pick the optimal variant + backend:
+# One command: auto-detects GPU/VRAM/RAM, picks the optimal Bonsai 2.5 packing + safe memory settings, and starts!
 bash start.sh
 
-# Or pick a specific variant directly:
+# In a second terminal, verify chat + native tool calling + measure tok/s:
+bash test-model.sh
+
+# Optional: interactive menu, or pick a specific variant directly:
+bash start.sh --choose
 bash start.sh ptq1-mtp    # 6.23 GB — fastest on NVIDIA CUDA & smallest MTP build
 bash start.sh pq2-mtp     # 7.49 GB — benchmarked on Apple Silicon Metal / CPU / Vulkan
 bash start.sh q2-mtp      # 7.91 GB — stock llama.cpp b11556+ compatible
@@ -34,16 +38,29 @@ Stop the server with `Ctrl+C` or `bash stop.sh`.
 git clone https://github.com/Mikehutu/bonsai-runner2
 cd bonsai-runner2
 
-# Auto-detect GPU (CUDA / HIP / Vulkan / CPU) and start:
+# One command: auto-detects GPU/VRAM/RAM (CUDA / HIP / Vulkan / CPU), downloads runtime + weights, and starts:
 powershell -ExecutionPolicy Bypass -File start.ps1
 
-# Or pick a specific variant / backend:
+# In a second PowerShell window, verify chat + native tool calling + measure tok/s:
+powershell -ExecutionPolicy Bypass -File test-model.ps1
+
+# Optional: interactive menu, or explicit variant/backend:
+powershell -ExecutionPolicy Bypass -File start.ps1 -Choose
 powershell -ExecutionPolicy Bypass -File start.ps1 -Variant ptq1-mtp
-powershell -ExecutionPolicy Bypass -File start.ps1 -Variant pq2-mtp -Backend vulkan
 powershell -ExecutionPolicy Bypass -File stop.ps1
 ```
 
 Then open **`http://localhost:8080`** in your browser for the built-in Web UI, or call `http://localhost:8080/v1/chat/completions` from any OpenAI-compatible tool or agent.
+
+### How Auto-Selection Works
+
+Running `start.sh` or `start.ps1` with no arguments automatically inspects your OS, CPU architecture, GPU vendor, VRAM, and system RAM:
+
+- **NVIDIA CUDA (10+ GB VRAM or unified memory like DGX Spark) / AMD ROCm & HIP** → picks **`ptq1-mtp`** (6.23 GB, fastest NVIDIA decode + built-in MTP `n-max=3, p-min=0.1`), 32K context.
+- **NVIDIA CUDA (≤ 8 GB VRAM, e.g. RTX 4060 / 3070)** → picks **`ptq1-mtp`** (6.23 GB) + auto-tunes **16K context**, **4-bit KV cache (`KV4=1`)**, and keeps the vision projector in system RAM (`--no-mmproj-offload`) so it fits cleanly without OOM.
+- **Apple Silicon Mac (16+ GB RAM)** → picks **`pq2-mtp`** (7.49 GB, benchmarked on Metal + built-in MTP `n-max=1, p-min=0.6`), 32K context.
+- **Apple Silicon Mac (8 GB RAM)** → picks **`ptq1-mtp`** (6.23 GB) + auto-tunes **8K context**, `KV4=1`, and CPU vision offload.
+- **Linux / Windows Vulkan or CPU** → picks **`pq2-mtp`** (7.49 GB) when RAM ≥ 12 GB, or **`ptq1-mtp`** (6.23 GB) + 8K context + `KV4=1` on tighter machines.
 
 ---
 

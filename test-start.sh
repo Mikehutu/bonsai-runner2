@@ -25,14 +25,16 @@ CD="$(cd "$(dirname "$0")" && pwd)"
 
 echo ""
 echo "═══ 1. File structure & syntax ═══"
-for f in start.sh stop.sh start.ps1 stop.ps1 .env.example .gitignore README.md AGENTS.md test-start.sh test-start.ps1; do
+for f in start.sh stop.sh start.ps1 stop.ps1 test-model.sh test-model.ps1 .env.example .gitignore README.md AGENTS.md test-start.sh test-start.ps1; do
   [[ -f "$CD/$f" ]] && pass "$f exists" || fail "$f missing"
 done
-[[ -x "$CD/start.sh" ]] && pass "start.sh is executable" || fail "start.sh not executable"
-[[ -x "$CD/stop.sh"  ]] && pass "stop.sh is executable"  || fail "stop.sh not executable"
+[[ -x "$CD/start.sh"      ]] && pass "start.sh is executable"      || fail "start.sh not executable"
+[[ -x "$CD/stop.sh"       ]] && pass "stop.sh is executable"       || fail "stop.sh not executable"
+[[ -x "$CD/test-model.sh" ]] && pass "test-model.sh is executable" || fail "test-model.sh not executable"
 
-bash -n "$CD/start.sh" 2>/dev/null && pass "start.sh passes bash -n syntax check" || fail "start.sh syntax error"
-bash -n "$CD/stop.sh"  2>/dev/null && pass "stop.sh passes bash -n syntax check"  || fail "stop.sh syntax error"
+bash -n "$CD/start.sh"      2>/dev/null && pass "start.sh passes bash -n syntax check"      || fail "start.sh syntax error"
+bash -n "$CD/stop.sh"       2>/dev/null && pass "stop.sh passes bash -n syntax check"       || fail "stop.sh syntax error"
+bash -n "$CD/test-model.sh" 2>/dev/null && pass "test-model.sh passes bash -n syntax check" || fail "test-model.sh syntax error"
 
 echo ""
 echo "═══ 2. macOS Bash 3.2 compatibility audit ═══"
@@ -93,9 +95,19 @@ check_contains "MTP_NMAX=1" "$OUT" "macOS arm64: MTP n-max=1"
 check_contains "MTP_PMIN=0.6" "$OUT" "macOS arm64: MTP p-min=0.6"
 check_contains "CTX_VALUE=32768" "$OUT" "macOS arm64: safe 32K context default"
 
-# 4b. macOS Apple Silicon (8 GB tight RAM)
+# 4b. macOS Apple Silicon (8 GB tight RAM -> auto safe tuning)
 OUT="$(BONSAI_DRY_RUN=1 BONSAI_TEST_OS=Darwin BONSAI_TEST_ARCH=arm64 BONSAI_TEST_RAM_MB=8192 bash "$CD/start.sh" 2>&1)"
 check_contains "VARIANT=ptq1-mtp" "$OUT" "macOS arm64 (8GB): auto picks smaller ptq1-mtp"
+check_contains "CTX_VALUE=8192"   "$OUT" "macOS arm64 (8GB): auto-tunes safe 8K context"
+check_contains "MMPROJ_CPU=1"     "$OUT" "macOS arm64 (8GB): keeps mmproj on CPU"
+check_contains "KV4=1"            "$OUT" "macOS arm64 (8GB): auto-enables 4-bit KV cache"
+
+# 4b2. Linux x86_64 NVIDIA 8 GB VRAM (RTX 4060 / 3070 -> auto safe tuning)
+OUT="$(BONSAI_DRY_RUN=1 BONSAI_TEST_OS=Linux BONSAI_TEST_ARCH=x86_64 BONSAI_TEST_BACKEND=cuda BONSAI_TEST_CUDA_VER=12.4 BONSAI_TEST_VRAM_MB=8192 bash "$CD/start.sh" 2>&1)"
+check_contains "VARIANT=ptq1-mtp" "$OUT" "Linux CUDA 8GB VRAM: auto picks ptq1-mtp"
+check_contains "CTX_VALUE=16384"  "$OUT" "Linux CUDA 8GB VRAM: auto-tunes safe 16K context"
+check_contains "MMPROJ_CPU=1"     "$OUT" "Linux CUDA 8GB VRAM: keeps mmproj in system RAM"
+check_contains "KV4=1"            "$OUT" "Linux CUDA 8GB VRAM: auto-enables 4-bit KV cache"
 
 # 4c. macOS Apple Silicon MLX dry run
 OUT="$(BONSAI_DRY_RUN=1 BONSAI_TEST_OS=Darwin BONSAI_TEST_ARCH=arm64 bash "$CD/start.sh" mlx 2>&1)"

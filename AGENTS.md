@@ -15,14 +15,16 @@ Instructions for AI coding agents (Antigravity, Claude Code, Codex, OpenCode, et
 bonsai-runner2/
 ├── start.sh          # One-click runner for Linux, macOS (Apple Silicon & Intel), and WSL2
 ├── stop.sh           # Stop server (Linux/macOS/WSL2)
+├── test-model.sh     # Live model test (health, chat + tok/s + MTP stats, native tool calling)
 ├── start.ps1         # Native Windows PowerShell runner (PowerShell 5.1 & 7+)
 ├── stop.ps1          # Stop server (Windows)
+├── test-model.ps1    # Live model test on Windows (health, chat + tok/s, native tool calling)
 ├── .env.example      # Configuration reference (auto-loaded if copied to .env)
 ├── .gitignore        # Ignores .env, logs, PID files, local models/bin
 ├── README.md         # User documentation
 ├── AGENTS.md         # This file
-├── test-start.sh     # Cross-platform validation suite for start.sh / stop.sh
-└── test-start.ps1    # Windows PowerShell validation suite for start.ps1 / stop.ps1
+├── test-start.sh     # Cross-platform validation suite for start.sh / stop.sh / test-model.sh
+└── test-start.ps1    # Windows PowerShell validation suite for start.ps1 / stop.ps1 / test-model.ps1
 ```
 
 ## Critical Invariants (Do Not Break)
