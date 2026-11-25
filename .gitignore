@@ -1,0 +1,8 @@
+.env
+*.log
+*.pid
+*.part
+models/
+bin/
+.DS_Store
+Thumbs.db
