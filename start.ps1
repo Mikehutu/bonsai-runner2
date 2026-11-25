@@ -13,6 +13,7 @@ param(
     [string]$Variant = "",            # auto | ptq1-mtp | pq2-mtp | q2-mtp | ptq1 | pq2 | q2
     [string]$Backend = "",            # auto | cuda | hip | vulkan | cpu
     [string]$Mode = "",               # thinking | instruct
+    [string]$ReasoningEffort = "",    # auto | xhigh | medium (thinking mode only)
     [string]$Mtp = "",                # auto | on | off
     [int]$Port = 0,                   # 0 = 8080 with 8081/8082 fallback
     [string]$HostAddr = "",           # "" = 0.0.0.0
@@ -72,8 +73,9 @@ if ($Help -or $Variant -in @("-h", "--help", "help")) {
     Write-Host "Options:"
     Write-Host "  -Variant <name>       Model variant (default: auto)"
     Write-Host "  -Backend <name>       auto | cuda | hip | vulkan | cpu"
-    Write-Host "  -Mode <name>          thinking (default) | instruct"
-    Write-Host "  -Mtp <name>           auto (on for CUDA/HIP) | on | off"
+    Write-Host "  -Mode <name>          thinking (default) | instruct (instant, no thinking trace)"
+    Write-Host "  -ReasoningEffort <L>  default | xhigh | medium (shorter, faster thinking)"
+    Write-Host "  -Mtp <name>           auto (on for CUDA/HIP/Vulkan) | on | off"
     Write-Host "  -Port <N>             Server port (default: 8080, fallback 8081-8082)"
     Write-Host "  -HostAddr <IP>        Bind address (default: 0.0.0.0)"
     Write-Host "  -Ngl <N>              GPU layers (default: 99, auto 0 on CPU)"
@@ -105,6 +107,9 @@ if ($Backend -eq "") {
 }
 if ($Mode -eq "") {
     if ($env:MODE) { $Mode = $env:MODE } else { $Mode = "thinking" }
+}
+if ($ReasoningEffort -eq "") {
+    if ($env:REASONING_EFFORT) { $ReasoningEffort = $env:REASONING_EFFORT } else { $ReasoningEffort = "default" }
 }
 if ($Mtp -eq "") {
     if ($env:MTP) { $Mtp = $env:MTP } else { $Mtp = "auto" }
@@ -141,6 +146,7 @@ if (-not $DryRun -and $env:BONSAI_DRY_RUN -eq "1") { $DryRun = $true }
 $Variant = $Variant.ToLowerInvariant()
 $Backend = $Backend.ToLowerInvariant()
 $Mode = $Mode.ToLowerInvariant()
+$ReasoningEffort = $ReasoningEffort.ToLowerInvariant()
 $Mtp = $Mtp.ToLowerInvariant()
 if ($Mtp -eq "1") { $Mtp = "on" }
 if ($Mtp -eq "0") { $Mtp = "off" }
@@ -148,6 +154,10 @@ $MmprojQuant = $MmprojQuant.ToUpperInvariant()
 
 if ($Mode -notin @("thinking", "instruct")) {
     Write-Host "[ERR] Unknown Mode '$Mode'. Valid: thinking, instruct" -ForegroundColor Red
+    exit 1
+}
+if ($ReasoningEffort -notin @("default", "xhigh", "medium")) {
+    Write-Host "[ERR] Unknown ReasoningEffort '$ReasoningEffort'. Valid: default, xhigh, medium" -ForegroundColor Red
     exit 1
 }
 if ($Mtp -notin @("auto", "on", "off")) {
@@ -408,11 +418,15 @@ $effNgl = if ($Backend -eq "cpu") { 0 } else { $Ngl }
 
 $mtpEnabled = $false
 if ($hasMtp -and $Mtp -ne "off") {
-    if ($Mtp -eq "on" -or $Backend -in @("cuda", "hip")) {
+    # Verified +63% decode on Radeon 890M Vulkan (8.32 -> 13.56 t/s with n-max=1 on PQ2_0; 14.45 t/s with n-max=2 on PTQ1_0)
+    if ($Mtp -eq "on" -or $Backend -in @("cuda", "hip", "vulkan")) {
         $mtpEnabled = $true
     }
 }
-$effMtpNmax = if ($env:MTP_NMAX) { $env:MTP_NMAX } else { "3" }
+$defaultNmax = if ($Backend -eq "vulkan") {
+    if ($Variant -eq "ptq1-mtp") { "2" } else { "1" }
+} else { "3" }
+$effMtpNmax = if ($env:MTP_NMAX) { $env:MTP_NMAX } else { $defaultNmax }
 $effMtpPmin = if ($env:MTP_PMIN) { $env:MTP_PMIN } else { "0.1" }
 
 if ($DryRun) {
@@ -678,6 +692,9 @@ if ($Mode -eq "instruct") {
         "--presence-penalty", "0.0",
         "--repeat-penalty", "1.0"
     )
+    if ($ReasoningEffort -ne "default") {
+        $serverArgs += @("--reasoning-effort", $ReasoningEffort)
+    }
 }
 
 if ($Parallel -gt 0) {

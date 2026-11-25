@@ -94,11 +94,11 @@ One repo covers every desktop/server platform:
 | **Linux x86_64 + NVIDIA** | `start.sh` | **CUDA** (12.4 / 12.8 / 13.3 auto-matched to driver) | Prebuilt PrismML Linux CUDA archive | **ON** (`n-max=3, p-min=0.1`) |
 | **Linux ARM64 + NVIDIA** (e.g. DGX Spark) | `start.sh` | **CUDA** (`aarch64`) | Auto-compiled from `PrismML-Eng/llama.cpp` (`-DGGML_CUDA=ON`) | **ON** (`n-max=3, p-min=0.1`) |
 | **Linux x86_64 + AMD ROCm** | `start.sh` | **ROCm** | Prebuilt PrismML Ubuntu ROCm 7.2 archive | **ON** (`n-max=3, p-min=0.1`) |
-| **Linux + Vulkan GPU** | `start.sh` | **Vulkan** (`x64` / `arm64`) | Prebuilt PrismML Ubuntu Vulkan archive | OFF (`MTP=on` to force) |
+| **Linux + Vulkan GPU** | `start.sh` | **Vulkan** (`x64` / `arm64`) | Prebuilt PrismML Ubuntu Vulkan archive | **ON** (`n-max=1` PQ2 / `n-max=2` PTQ1, `p-min=0.1`) |
 | **Linux / WSL2 CPU** | `start.sh` | **CPU** (`x64` / `arm64`) | Prebuilt PrismML Ubuntu CPU archive (falls back to source build if glibc mismatch) | OFF (`MTP=on` to force) |
 | **Windows 10/11 + NVIDIA** | `start.ps1` | **CUDA** (12.4 / 13.3 / arm64 13.4) | Prebuilt PrismML Windows CUDA + bundled `cudart` DLLs | **ON** (`n-max=3, p-min=0.1`) |
 | **Windows 10/11 + AMD HIP** | `start.ps1` | **HIP** | Prebuilt PrismML Windows HIP Radeon archive | **ON** (`n-max=3, p-min=0.1`) |
-| **Windows 10/11 + AMD/Intel GPU** | `start.ps1` | **Vulkan** | Prebuilt PrismML Windows Vulkan archive (auto-falls back to CPU if smoke test fails) | OFF (`-Mtp on` to force) |
+| **Windows 10/11 + AMD/Intel GPU** | `start.ps1` | **Vulkan** | Prebuilt PrismML Windows Vulkan archive (auto-falls back to CPU if smoke test fails) | **ON** (`n-max=1` PQ2 / `n-max=2` PTQ1, `p-min=0.1`) |
 | **Windows 10/11 CPU** | `start.ps1` | **CPU** (`x64` / `arm64`) | Prebuilt PrismML Windows CPU archive | OFF (`-Mtp on` to force) |
 
 > **macOS note:** `start.sh` is written for strict **Bash 3.2 compatibility** (macOS's built-in `/bin/bash`) — no Homebrew bash required. It automatically runs `xattr -cr` and ad-hoc `codesign` on downloaded binaries and `.dylib` files. We verify Linux and Windows live and audit macOS paths via cross-platform dry-run simulation + Bash 3.2 static checks.

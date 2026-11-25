@@ -155,7 +155,11 @@ check_contains "MODE=instruct" "$OUT" "instruct mode applied"
 check_contains "KV4=1" "$OUT" "KV4=1 applied"
 check_contains "MMPROJ_FILE=" "$OUT" "NO_VISION=1 clears mmproj"
 check_contains "CTX_VALUE=131072" "$OUT" "explicit CONTEXT_SIZE=131072 honored"
-check_contains "MTP_ENABLED=0" "$OUT" "Vulkan: MTP off by default"
+check_contains "MTP_ENABLED=1" "$OUT" "Vulkan: MTP auto-enabled (+63% measured on Radeon 890M)"
+check_contains "MTP_NMAX=1"    "$OUT" "Vulkan Q2/PQ2: MTP n-max=1"
+
+OUT_VK_PTQ="$(BONSAI_DRY_RUN=1 BONSAI_TEST_OS=Linux BONSAI_TEST_ARCH=x86_64 BONSAI_TEST_BACKEND=vulkan bash "$CD/start.sh" ptq1-mtp 2>&1)"
+check_contains "MTP_NMAX=2"    "$OUT_VK_PTQ" "Vulkan PTQ1_0: MTP n-max=2"
 
 # 4j. Linux x86_64 CPU + MTP forced ON + base non-MTP check
 OUT="$(BONSAI_DRY_RUN=1 BONSAI_TEST_OS=Linux BONSAI_TEST_ARCH=x86_64 BONSAI_TEST_BACKEND=cpu MTP=on bash "$CD/start.sh" ptq1-mtp 2>&1)"

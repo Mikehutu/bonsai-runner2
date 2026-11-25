@@ -99,7 +99,11 @@ Check $outVk "PREBUILT_ASSET=llama-prism-b12178-03ec600-bin-win-vulkan-x64.zip" 
 Check $outVk "MODE=instruct" "Win Vulkan: instruct mode"
 Check $outVk "KV4=True" "Win Vulkan: KV4 enabled"
 Check $outVk "CTX_VALUE=65536" "Win Vulkan: explicit context 65536"
-Check $outVk "MTP_ENABLED=False" "Win Vulkan: MTP off by default"
+Check $outVk "MTP_ENABLED=True" "Win Vulkan: MTP auto-enabled (+63% measured)"
+Check $outVk "MTP_NMAX=1"       "Win Vulkan PQ2_0: MTP n-max=1"
+
+$outVkPtq = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startPs1 -DryRun -Variant ptq1-mtp 2>&1 | Out-String)
+Check $outVkPtq "MTP_NMAX=2"    "Win Vulkan PTQ1_0: MTP n-max=2"
 
 # 3g. Windows ARM64 CPU
 $env:BONSAI_TEST_ARCH = "ARM64"

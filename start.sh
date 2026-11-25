@@ -92,6 +92,7 @@ NGL="${NGL:-99}"
 PARALLEL="${PARALLEL:-1}"             # 1 = safe VRAM default (model card recommends -np 1 on <=10GB GPUs)
 CONTEXT_SIZE="${CONTEXT_SIZE:-0}"     # 0 = safe 32K default (max 262144)
 MODE="${MODE:-thinking}"              # thinking | instruct
+REASONING_EFFORT="${REASONING_EFFORT:-default}"  # default | xhigh | medium (thinking mode)
 MTP="${MTP:-auto}"                    # auto | on | off
 MTP_NMAX="${MTP_NMAX:-}"
 MTP_PMIN="${MTP_PMIN:-}"
@@ -135,8 +136,9 @@ Environment variables (or set in .env):
   CONTEXT_SIZE=0          Context tokens (0 = safe 32768 default; max 262144)
   PARALLEL=1              Concurrent slots (1 = low VRAM default; 0 = llama-server auto)
   MODE=thinking           thinking (default) | instruct (non-thinking)
-  MTP=auto                Speculative decoding: auto (on for CUDA/ROCm/Metal) | on | off
-  MTP_NMAX=               Override draft tokens per step (default: 3 CUDA/ROCm, 1 Metal)
+  REASONING_EFFORT=default default | xhigh | medium (shorter, faster thinking)
+  MTP=auto                Speculative decoding: auto (on for CUDA/ROCm/Metal/Vulkan) | on | off
+  MTP_NMAX=               Override draft tokens (default: 3 CUDA/ROCm, 1 Metal/Vulkan PQ2, 2 Vulkan PTQ1)
   MTP_PMIN=               Override draft min probability (default: 0.1 CUDA/ROCm, 0.6 Metal)
   NO_VISION=0             Set 1 to skip multimodal vision projector (mmproj)
   MMPROJ_QUANT=Q8_0       Vision projector quant: Q8_0 (0.63 GB) or BF16 (0.93 GB)
@@ -310,6 +312,15 @@ case "${MODE}" in
   thinking|instruct) ;;
   *)
     echo "❌ Unknown MODE '${MODE}' (valid: thinking, instruct)" >&2
+    exit 1
+    ;;
+esac
+
+REASONING_EFFORT="$(to_lower "${REASONING_EFFORT}")"
+case "${REASONING_EFFORT}" in
+  default|xhigh|medium) ;;
+  *)
+    echo "❌ Unknown REASONING_EFFORT '${REASONING_EFFORT}' (valid: default, xhigh, medium)" >&2
     exit 1
     ;;
 esac
@@ -661,9 +672,9 @@ if [[ "${HAS_MTP}" == "1" && "${MTP}" != "off" ]]; then
   if [[ "${MTP}" == "on" ]]; then
     MTP_ENABLED=1
   else
-    # auto: enable where PrismML measured a decode speedup
+    # auto: enable where measured faster (CUDA/ROCm/Metal + Vulkan verified +63% on Radeon 890M)
     case "${BACKEND}" in
-      cuda|rocm|metal) MTP_ENABLED=1 ;;
+      cuda|rocm|metal|vulkan) MTP_ENABLED=1 ;;
       *) MTP_ENABLED=0 ;;
     esac
   fi
@@ -673,6 +684,13 @@ if [[ "${MTP_ENABLED}" == "1" ]]; then
   if [[ "${BACKEND}" == "metal" ]]; then
     EFF_MTP_NMAX="${MTP_NMAX:-1}"
     EFF_MTP_PMIN="${MTP_PMIN:-0.6}"
+  elif [[ "${BACKEND}" == "vulkan" ]]; then
+    if [[ "${VARIANT_KEY}" == "ptq1-mtp" ]]; then
+      EFF_MTP_NMAX="${MTP_NMAX:-2}"
+    else
+      EFF_MTP_NMAX="${MTP_NMAX:-1}"
+    fi
+    EFF_MTP_PMIN="${MTP_PMIN:-0.1}"
   else
     EFF_MTP_NMAX="${MTP_NMAX:-3}"
     EFF_MTP_PMIN="${MTP_PMIN:-0.1}"
@@ -1022,6 +1040,9 @@ else
     --presence-penalty 0.0
     --repeat-penalty 1.0
   )
+  if [[ "${REASONING_EFFORT}" != "default" ]]; then
+    SERVER_ARGS+=(--reasoning-effort "${REASONING_EFFORT}")
+  fi
 fi
 
 if [[ "${PARALLEL}" != "0" && -n "${PARALLEL}" ]]; then
