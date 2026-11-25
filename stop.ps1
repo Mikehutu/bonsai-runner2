@@ -1,17 +1,21 @@
-﻿# stop.ps1 — Stop the Ternary Bonsai 2.5 27B server started by start.ps1
+# stop.ps1 - Stop the Ternary Bonsai 2.5 27B server started by start.ps1
 $ErrorActionPreference = "Stop"
 
-$baseDir = if ($env:BONSAI25_DIR) { $env:BONSAI25_DIR } else { Join-Path $HOME ".bonsai25" }
+$homeDir = if ($HOME) { $HOME } elseif ($env:USERPROFILE) { $env:USERPROFILE } else { "." }
+$baseDir = if ($env:BONSAI25_DIR) { $env:BONSAI25_DIR } else { Join-Path $homeDir ".bonsai25" }
 $pidFile = Join-Path $baseDir "llama-server.pid"
 
 if (Test-Path $pidFile) {
-    $pidVal = [int](Get-Content -Path $pidFile -Raw).Trim()
-    $proc = Get-Process -Id $pidVal -ErrorAction SilentlyContinue
-    if ($proc) {
-        Stop-Process -Id $pidVal -Force
-        Write-Host "[OK] Stopped llama-server (PID $pidVal)" -ForegroundColor Green
-    } else {
-        Write-Host "PID $pidVal not running (already stopped)."
+    $rawPid = (Get-Content -Path $pidFile -Raw -ErrorAction SilentlyContinue)
+    $pidVal = 0
+    if ($rawPid -and [int]::TryParse($rawPid.Trim(), [ref]$pidVal) -and $pidVal -gt 0) {
+        $proc = Get-Process -Id $pidVal -ErrorAction SilentlyContinue
+        if ($proc) {
+            Stop-Process -Id $pidVal -Force
+            Write-Host "[OK] Stopped llama-server (PID $pidVal)" -ForegroundColor Green
+        } else {
+            Write-Host "PID $pidVal not running (already stopped)."
+        }
     }
     Remove-Item -Path $pidFile -ErrorAction SilentlyContinue
 } else {

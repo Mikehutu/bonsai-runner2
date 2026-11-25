@@ -1,4 +1,4 @@
-﻿# test-model.ps1 — Quick live verification for a running Ternary Bonsai 2.5 27B server on Windows
+# test-model.ps1 - Quick live verification for a running Ternary Bonsai 2.5 27B server on Windows
 # Tests health, model metadata, chat generation (+ tok/s + MTP draft stats), and native tool calling.
 #
 # Usage:
@@ -11,6 +11,18 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+
+# Load PORT from .env if present and not overridden
+$envPath = Join-Path $PSScriptRoot ".env"
+if ($Port -eq 0 -and -not $env:PORT -and (Test-Path $envPath)) {
+    foreach ($rawLine in (Get-Content -Path $envPath -ErrorAction SilentlyContinue)) {
+        if ($rawLine -match '^\s*PORT\s*=\s*(\d+)') {
+            $Port = [int]$Matches[1]
+            break
+        }
+    }
+}
 if ($Port -eq 0) {
     if ($env:PORT) { $Port = [int]$env:PORT } else { $Port = 8080 }
 }
@@ -32,29 +44,32 @@ try {
 }
 
 # 2. Model metadata
+$modelId = "bonsai-2.5"
 $models = Invoke-RestMethod -Uri "$baseUrl/v1/models" -TimeoutSec 10
 if ($models.data -and $models.data.Count -gt 0) {
     $m = $models.data[0]
+    if ($m.id) { $modelId = $m.id }
     Write-Host "[OK] Model:      $(Split-Path -Leaf $m.id)" -ForegroundColor Green
-    if ($m.meta.ftype) { Write-Host "     Packing:    $($m.meta.ftype)" }
-    if ($m.meta.n_ctx) { Write-Host "     Context:    $($m.meta.n_ctx) active / $($m.meta.n_ctx_train) max" }
-    if ($m.architecture.input_modalities) { Write-Host "     Modalities: $($m.architecture.input_modalities -join ', ')" }
+    if ($m.meta -and $m.meta.ftype) { Write-Host "     Packing:    $($m.meta.ftype)" }
+    if ($m.meta -and $m.meta.n_ctx) { Write-Host "     Context:    $($m.meta.n_ctx) active / $($m.meta.n_ctx_train) max" }
+    if ($m.architecture -and $m.architecture.input_modalities) { Write-Host "     Modalities: $($m.architecture.input_modalities -join ', ')" }
 }
 
 # 3. Chat completion + throughput + MTP stats
 Write-Host ""
 Write-Host "-- Test 1: Chat Completion & Throughput --"
 $chatPayload = @{
-    model = "bonsai-2.5"
+    model = $modelId
     messages = @(
         @{ role = "system"; content = "You are a helpful assistant" },
         @{ role = "user"; content = "What is 17 + 25? Reply with just the number." }
     )
-    max_tokens = 512
+    max_tokens = 2048
     temperature = 0
 } | ConvertTo-Json -Depth 6
 
-$chatRes = Invoke-RestMethod -Method Post -Uri "$baseUrl/v1/chat/completions" -ContentType "application/json" -Body $chatPayload -TimeoutSec 120
+$chatBytes = [System.Text.Encoding]::UTF8.GetBytes($chatPayload)
+$chatRes = Invoke-RestMethod -Method Post -Uri "$baseUrl/v1/chat/completions" -ContentType "application/json; charset=utf-8" -Body $chatBytes -TimeoutSec 180
 $msg = $chatRes.choices[0].message
 $ans = if ($msg.content) { $msg.content.Trim() } else { "(still in reasoning trace - increase max_tokens)" }
 Write-Host "[OK] Answer:     $ans" -ForegroundColor Green
@@ -69,7 +84,7 @@ if ($chatRes.timings) {
         $pct = [math]::Round(100.0 * $chatRes.timings.draft_n_accepted / $chatRes.timings.draft_n, 1)
         Write-Host "     MTP Draft:  $($chatRes.timings.draft_n_accepted)/$($chatRes.timings.draft_n) accepted ($pct%)"
     } else {
-        Write-Host "     MTP Draft:  inactive (normal on CPU/Vulkan or non-MTP builds)"
+        Write-Host "     MTP Draft:  inactive (normal on CPU or non-MTP builds)"
     }
 }
 
@@ -77,7 +92,7 @@ if ($chatRes.timings) {
 Write-Host ""
 Write-Host "-- Test 2: Native Agentic Tool Calling --"
 $toolPayload = @{
-    model = "bonsai-2.5"
+    model = $modelId
     messages = @(
         @{ role = "system"; content = "You are a helpful assistant. Use the provided tools when appropriate." },
         @{ role = "user"; content = "Check the current weather in Helsinki in Celsius." }
@@ -99,11 +114,12 @@ $toolPayload = @{
             }
         }
     )
-    max_tokens = 512
+    max_tokens = 2048
     temperature = 0
 } | ConvertTo-Json -Depth 10
 
-$toolRes = Invoke-RestMethod -Method Post -Uri "$baseUrl/v1/chat/completions" -ContentType "application/json" -Body $toolPayload -TimeoutSec 120
+$toolBytes = [System.Text.Encoding]::UTF8.GetBytes($toolPayload)
+$toolRes = Invoke-RestMethod -Method Post -Uri "$baseUrl/v1/chat/completions" -ContentType "application/json; charset=utf-8" -Body $toolBytes -TimeoutSec 180
 $tMsg = $toolRes.choices[0].message
 if ($tMsg.tool_calls -and $tMsg.tool_calls.Count -gt 0) {
     $fn = $tMsg.tool_calls[0].function

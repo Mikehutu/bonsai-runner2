@@ -1,4 +1,4 @@
-﻿# start.ps1 — Ternary Bonsai 2.5 27B one-click runner for Windows (native PowerShell)
+# start.ps1 - Ternary Bonsai 2.5 27B one-click runner for Windows (native PowerShell)
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File start.ps1
@@ -7,18 +7,19 @@
 #   powershell -ExecutionPolicy Bypass -File start.ps1 -Backend cpu -NoVision
 #
 # Works on Windows 10/11 with built-in PowerShell 5.1 or PowerShell 7+ and curl.exe.
+# Pure 7-bit ASCII so every Windows ANSI codepage parses cleanly with or without BOM.
 # No WSL, Python, Git, or C++ compiler required.
 
 param(
     [string]$Variant = "",            # auto | ptq1-mtp | pq2-mtp | q2-mtp | ptq1 | pq2 | q2
     [string]$Backend = "",            # auto | cuda | hip | vulkan | cpu
     [string]$Mode = "",               # thinking | instruct
-    [string]$ReasoningEffort = "",    # auto | xhigh | medium (thinking mode only)
+    [string]$ReasoningEffort = "",    # default | xhigh | medium (thinking mode only)
     [string]$Mtp = "",                # auto | on | off
     [int]$Port = 0,                   # 0 = 8080 with 8081/8082 fallback
     [string]$HostAddr = "",           # "" = 0.0.0.0
-    [int]$Ngl = -1,                   # -1 = default (99 GPU / 0 CPU)
-    [int]$ContextSize = -1,           # -1/0 = safe 32K default (max 262144)
+    [string]$Ngl = "",                # "" = default (99 GPU / auto <=6GB VRAM / 0 CPU)
+    [int]$ContextSize = -1,           # -1/0 = safe auto default (max 262144)
     [int]$Parallel = -1,              # -1 = default 1 (safe VRAM); 0 = llama-server auto
     [string]$MmprojQuant = "",        # Q8_0 | BF16
     [int]$ImageMaxTokens = -1,        # -1 = default 1024; 0 = uncapped
@@ -35,7 +36,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# ─── Optional .env loader (never overwrites already-set env vars) ─────
+# --- Optional .env loader (never overwrites already-set env vars) -----
 $envPath = Join-Path $PSScriptRoot ".env"
 if (Test-Path $envPath) {
     foreach ($rawLine in (Get-Content -Path $envPath -ErrorAction SilentlyContinue)) {
@@ -55,7 +56,7 @@ if (Test-Path $envPath) {
     }
 }
 
-# ─── Help ─────────────────────────────────────────────────────────────
+# --- Help -------------------------------------------------------------
 if ($Help -or $Variant -in @("-h", "--help", "help")) {
     Write-Host "Usage: powershell -ExecutionPolicy Bypass -File start.ps1 [options]"
     Write-Host ""
@@ -78,8 +79,8 @@ if ($Help -or $Variant -in @("-h", "--help", "help")) {
     Write-Host "  -Mtp <name>           auto (on for CUDA/HIP/Vulkan) | on | off"
     Write-Host "  -Port <N>             Server port (default: 8080, fallback 8081-8082)"
     Write-Host "  -HostAddr <IP>        Bind address (default: 0.0.0.0)"
-    Write-Host "  -Ngl <N>              GPU layers (default: 99, auto 0 on CPU)"
-    Write-Host "  -ContextSize <N>      Context length (0 = safe 32768; max 262144)"
+    Write-Host "  -Ngl <N|auto>         GPU layers (default: 99, auto on <=6GB VRAM, 0 on CPU)"
+    Write-Host "  -ContextSize <N>      Context length (0 = safe auto default; max 262144)"
     Write-Host "  -Parallel <N>         Concurrent slots (default: 1; 0 = auto)"
     Write-Host "  -NoVision             Skip multimodal vision projector (mmproj)"
     Write-Host "  -MmprojQuant <Q>      Q8_0 (0.63 GB, default) | BF16 (0.93 GB)"
@@ -95,8 +96,11 @@ if ($Help -or $Variant -in @("-h", "--help", "help")) {
     exit 0
 }
 
-# ─── Resolve config from CLI params + env vars ────────────────────────
-$rawVariant = $Variant
+# --- Resolve config from CLI params + env vars ------------------------
+$userSetNgl       = ($Ngl -ne "") -or ($null -ne $env:NGL)
+$userSetMmprojCpu = $MmprojCpu.IsPresent -or ($null -ne $env:MMPROJ_CPU)
+$userSetKv4       = $Kv4.IsPresent       -or ($null -ne $env:KV4)
+
 if ($Variant -eq "") {
     if ($env:MODEL_VARIANT) { $Variant = $env:MODEL_VARIANT } else { $Variant = "auto" }
 }
@@ -120,8 +124,8 @@ if ($Port -eq 0) {
 if ($HostAddr -eq "") {
     if ($env:HOST) { $HostAddr = $env:HOST } else { $HostAddr = "0.0.0.0" }
 }
-if ($Ngl -lt 0) {
-    if ($env:NGL) { $Ngl = [int]$env:NGL } else { $Ngl = 99 }
+if ($Ngl -eq "") {
+    if ($env:NGL) { $Ngl = $env:NGL } else { $Ngl = "99" }
 }
 if ($ContextSize -lt 0) {
     if ($env:CONTEXT_SIZE) { $ContextSize = [int]$env:CONTEXT_SIZE } else { $ContextSize = 0 }
@@ -135,15 +139,14 @@ if ($MmprojQuant -eq "") {
 if ($ImageMaxTokens -lt 0) {
     if ($env:IMAGE_MAX_TOKENS) { $ImageMaxTokens = [int]$env:IMAGE_MAX_TOKENS } else { $ImageMaxTokens = 1024 }
 }
-$userSetMmprojCpu = $MmprojCpu.IsPresent -or ($null -ne $env:MMPROJ_CPU)
-$userSetKv4       = $Kv4.IsPresent       -or ($null -ne $env:KV4)
 if (-not $NoVision -and $env:NO_VISION -eq "1") { $NoVision = $true }
 if (-not $MmprojCpu -and $env:MMPROJ_CPU -eq "1") { $MmprojCpu = $true }
 if (-not $Kv4 -and $env:KV4 -eq "1") { $Kv4 = $true }
 if (-not $NoBrowser -and $env:NO_BROWSER -eq "1") { $NoBrowser = $true }
+if (-not $Detached -and $env:DETACHED -eq "1") { $Detached = $true }
 if (-not $DryRun -and $env:BONSAI_DRY_RUN -eq "1") { $DryRun = $true }
 
-$Variant = $Variant.ToLowerInvariant()
+$Variant = $Variant.ToLowerInvariant().Replace("_0", "")
 $Backend = $Backend.ToLowerInvariant()
 $Mode = $Mode.ToLowerInvariant()
 $ReasoningEffort = $ReasoningEffort.ToLowerInvariant()
@@ -152,6 +155,11 @@ if ($Mtp -eq "1") { $Mtp = "on" }
 if ($Mtp -eq "0") { $Mtp = "off" }
 $MmprojQuant = $MmprojQuant.ToUpperInvariant()
 
+if ($Variant -eq "mlx") {
+    Write-Host "[ERR] The 'mlx' variant is only for Apple Silicon macOS (arm64)." -ForegroundColor Red
+    Write-Host "      On Windows, run without -Variant (auto) or use -Variant ptq1-mtp / pq2-mtp." -ForegroundColor Yellow
+    exit 1
+}
 if ($Mode -notin @("thinking", "instruct")) {
     Write-Host "[ERR] Unknown Mode '$Mode'. Valid: thinking, instruct" -ForegroundColor Red
     exit 1
@@ -188,16 +196,26 @@ if ($Variant -ne "auto" -and -not $VARIANTS.ContainsKey($Variant)) {
     exit 1
 }
 
-# ─── Paths ────────────────────────────────────────────────────────────
-$baseDir   = if ($env:BONSAI25_DIR) { $env:BONSAI25_DIR } else { Join-Path $HOME ".bonsai25" }
+# --- Paths ------------------------------------------------------------
+$homeDir   = if ($HOME) { $HOME } elseif ($env:USERPROFILE) { $env:USERPROFILE } else { "." }
+$baseDir   = if ($env:BONSAI25_DIR) { $env:BONSAI25_DIR } else { Join-Path $homeDir ".bonsai25" }
 $modelsDir = if ($env:MODELS_DIR) { $env:MODELS_DIR } else { Join-Path $baseDir "models" }
 $binRoot   = Join-Path $baseDir "bin"
 $dlDir     = Join-Path $baseDir "downloads"
 $pidFile   = Join-Path $baseDir "llama-server.pid"
 $logFile   = Join-Path $baseDir "llama-server.log"
 
-# ─── Architecture & Hardware Detection ────────────────────────────────
-$archRaw = if ($env:BONSAI_TEST_ARCH) { $env:BONSAI_TEST_ARCH } else { $env:PROCESSOR_ARCHITECTURE }
+# --- Architecture & Hardware Detection --------------------------------
+$archRaw = ""
+if ($env:BONSAI_TEST_ARCH) {
+    $archRaw = $env:BONSAI_TEST_ARCH
+} elseif ($env:PROCESSOR_ARCHITEW6432) {
+    $archRaw = $env:PROCESSOR_ARCHITEW6432
+} elseif ($env:PROCESSOR_ARCHITECTURE) {
+    $archRaw = $env:PROCESSOR_ARCHITECTURE
+} else {
+    $archRaw = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+}
 $archSuffix = if ($archRaw -match "ARM64") { "arm64" } else { "x64" }
 
 $totalRamMB = 0
@@ -205,65 +223,82 @@ if ($env:BONSAI_TEST_RAM_MB) {
     $totalRamMB = [int]$env:BONSAI_TEST_RAM_MB
 } else {
     try {
-        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
-        if ($cs -and $cs.TotalPhysicalMemory) {
-            $totalRamMB = [int][math]::Floor($cs.TotalPhysicalMemory / 1MB)
+        if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+            $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+            if ($cs -and $cs.TotalPhysicalMemory) {
+                $totalRamMB = [int][math]::Floor($cs.TotalPhysicalMemory / 1MB)
+            }
         }
     } catch {}
 }
 
+function Get-NvidiaSmiCandidates {
+    $cands = @()
+    $cmd = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { $cands += $cmd.Source }
+    if ($env:SystemRoot) { $cands += (Join-Path $env:SystemRoot "System32\nvidia-smi.exe") }
+    if ($env:ProgramFiles) { $cands += (Join-Path $env:ProgramFiles "NVIDIA Corporation\NVSMI\nvidia-smi.exe") }
+    return $cands
+}
+
 function Detect-NvidiaVramMB {
     if ($env:BONSAI_TEST_VRAM_MB) { return [int]$env:BONSAI_TEST_VRAM_MB }
-    $nvsmiPaths = @(
-        "nvidia-smi.exe",
-        "$env:SystemRoot\System32\nvidia-smi.exe",
-        "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
-    )
-    foreach ($p in $nvsmiPaths) {
-        try {
-            $out = & $p --query-gpu=memory.total --format=csv,noheader,nounits 2>&1 | Select-Object -First 1
-            if ($out -and ($out.ToString().Trim() -match '^\d+$')) {
-                return [int]$out.ToString().Trim()
-            }
-        } catch {}
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        foreach ($p in (Get-NvidiaSmiCandidates)) {
+            if (-not $p -or -not (Test-Path $p)) { continue }
+            try {
+                $out = & $p --query-gpu=memory.total --format=csv,noheader,nounits 2>$null | Select-Object -First 1
+                if ($out -and ($out.ToString().Trim() -match '^\d+$')) {
+                    return [int]$out.ToString().Trim()
+                }
+            } catch {}
+        }
+    } finally {
+        $ErrorActionPreference = $prevEAP
     }
     return 0
 }
 
-function Detect-CudaTag {
+function Probe-NvidiaCudaTag {
     if ($env:BONSAI_TEST_CUDA_VER) {
         $ver = $env:BONSAI_TEST_CUDA_VER
         if ($ver -match '^(\d+)\.(\d+)') {
             $maj = [int]$Matches[1]; $min = [int]$Matches[2]
             if ($archSuffix -eq "arm64") { return "13.4" }
             if ($maj -gt 13 -or ($maj -eq 13 -and $min -ge 3)) { return "13.3" }
-            return "12.4"
+            if ($maj -gt 12 -or ($maj -eq 12 -and $min -ge 4)) { return "12.4" }
+            return "too-old"
         }
     }
-    $nvsmiPaths = @(
-        "nvidia-smi.exe",
-        "$env:SystemRoot\System32\nvidia-smi.exe",
-        "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
-    )
-    foreach ($p in $nvsmiPaths) {
-        try {
-            $out = & $p 2>&1 | Out-String
-            if ($out -match 'CUDA(?:\s+UMD)?\s+Version:\s+(\d+)\.(\d+)') {
-                $maj = [int]$Matches[1]; $min = [int]$Matches[2]
-                if ($archSuffix -eq "arm64") { return "13.4" }
-                if ($maj -gt 13 -or ($maj -eq 13 -and $min -ge 3)) { return "13.3" }
-                if ($maj -gt 12 -or ($maj -eq 12 -and $min -ge 4)) { return "12.4" }
-                return "too-old"
-            }
-        } catch {}
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        foreach ($p in (Get-NvidiaSmiCandidates)) {
+            if (-not $p -or -not (Test-Path $p)) { continue }
+            try {
+                $out = & $p 2>&1 | Out-String
+                if ($out -match 'CUDA(?:\s+UMD)?\s+Version:\s+(\d+)\.(\d+)') {
+                    $maj = [int]$Matches[1]; $min = [int]$Matches[2]
+                    if ($archSuffix -eq "arm64") { return "13.4" }
+                    if ($maj -gt 13 -or ($maj -eq 13 -and $min -ge 3)) { return "13.3" }
+                    if ($maj -gt 12 -or ($maj -eq 12 -and $min -ge 4)) { return "12.4" }
+                    return "too-old"
+                }
+            } catch {}
+        }
+    } finally {
+        $ErrorActionPreference = $prevEAP
     }
-    if ($archSuffix -eq "arm64") { return "13.4" }
-    return "12.4"
+    return ""
 }
 
 $gpuNames = @()
 try {
-    $gpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+        $gpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    }
 } catch {}
 $gpuStr = $gpuNames -join "; "
 
@@ -272,24 +307,31 @@ $backendAuto = ($Backend -eq "auto")
 
 if ($env:BONSAI_TEST_BACKEND) {
     $Backend = $env:BONSAI_TEST_BACKEND.ToLowerInvariant()
-    if ($Backend -eq "cuda") { $cudaTag = Detect-CudaTag }
+    if ($Backend -eq "cuda") {
+        $ct = Probe-NvidiaCudaTag
+        if (-not $ct -or $ct -eq "too-old") { $ct = if ($archSuffix -eq "arm64") { "13.4" } else { "12.4" } }
+        $cudaTag = $ct
+    }
 } elseif ($Backend -eq "auto") {
     $detectedCuda = $false
-    if ($gpuStr -match "NVIDIA") {
-        $ct = Detect-CudaTag
-        if ($ct -ne "too-old") {
-            $Backend = "cuda"
-            $cudaTag = $ct
-            $detectedCuda = $true
-        } else {
-            Write-Host "[WARN] NVIDIA GPU driver CUDA version < 12.4; falling back." -ForegroundColor Yellow
-        }
+    # Probe nvidia-smi directly as well as WMI so TCC / headless / cloud Windows GPUs are detected
+    $ct = Probe-NvidiaCudaTag
+    if ($ct -and $ct -ne "too-old") {
+        $Backend = "cuda"
+        $cudaTag = $ct
+        $detectedCuda = $true
+    } elseif ($ct -eq "too-old") {
+        Write-Host "[WARN] NVIDIA GPU driver CUDA version < 12.4; falling back." -ForegroundColor Yellow
     }
     if (-not $detectedCuda) {
         $hasHip = $false
         if ($archSuffix -eq "x64") {
             if ($env:HIP_PATH -and (Test-Path $env:HIP_PATH)) { $hasHip = $true }
             elseif (Get-Command hipcc -ErrorAction SilentlyContinue) { $hasHip = $true }
+            elseif ($env:ProgramFiles) {
+                $rocmGlob = Join-Path $env:ProgramFiles "AMD\ROCm\*\bin\hipcc.exe"
+                if (Get-Item $rocmGlob -ErrorAction SilentlyContinue) { $hasHip = $true }
+            }
         }
         if ($hasHip) {
             $Backend = "hip"
@@ -300,8 +342,9 @@ if ($env:BONSAI_TEST_BACKEND) {
         }
     }
 } elseif ($Backend -eq "cuda") {
-    $cudaTag = Detect-CudaTag
-    if ($cudaTag -eq "too-old") { $cudaTag = "12.4" }
+    $ct = Probe-NvidiaCudaTag
+    if (-not $ct -or $ct -eq "too-old") { $ct = if ($archSuffix -eq "arm64") { "13.4" } else { "12.4" } }
+    $cudaTag = $ct
 }
 
 if ($Backend -notin @("cuda", "hip", "vulkan", "cpu")) {
@@ -322,7 +365,9 @@ $autoReason = ""
 $recommended = ""
 if ($Backend -eq "cuda") {
     $recommended = "ptq1-mtp"
-    if ($totalVramMB -gt 0 -and $totalVramMB -le 9000) {
+    if ($totalVramMB -gt 0 -and $totalVramMB -le 6800) {
+        $autoReason = "CUDA <=6GB VRAM ($totalVramMB MB): PTQ1_0-mtp + auto layer fit + 16K ctx + KV4 + CPU mmproj"
+    } elseif ($totalVramMB -gt 0 -and $totalVramMB -le 9500) {
         $autoReason = "CUDA <=9GB VRAM ($totalVramMB MB): smallest PTQ1_0-mtp + 16K ctx + KV4 + CPU mmproj"
     } elseif ($totalVramMB -gt 0) {
         $autoReason = "CUDA ($totalVramMB MB VRAM): PTQ1_0-mtp is fastest decode on NVIDIA + built-in MTP"
@@ -335,6 +380,9 @@ if ($Backend -eq "cuda") {
 } elseif ($totalRamMB -gt 0 -and $totalRamMB -lt 12000) {
     $recommended = "ptq1-mtp"
     $autoReason = "$Backend tight RAM ($totalRamMB MB): smallest PTQ1_0-mtp + 8K ctx + KV4"
+} elseif ($totalRamMB -ge 12000 -and $totalRamMB -lt 20000) {
+    $recommended = "pq2-mtp"
+    $autoReason = "$Backend ($totalRamMB MB RAM): PQ2_0-mtp + safe 16K context"
 } else {
     $recommended = "pq2-mtp"
     $autoReason = "$Backend ($totalRamMB MB RAM): PQ2_0-mtp for smooth unpacking and strong prefill"
@@ -342,7 +390,7 @@ if ($Backend -eq "cuda") {
 
 if ($Choose -and -not $NonInteractive -and -not $DryRun) {
     Write-Host "==========================================================" -ForegroundColor Cyan
-    Write-Host "  Ternary Bonsai 2.5 27B Runner — Interactive Setup" -ForegroundColor Cyan
+    Write-Host "  Ternary Bonsai 2.5 27B Runner - Interactive Setup" -ForegroundColor Cyan
     Write-Host "==========================================================" -ForegroundColor Cyan
     Write-Host "   Backend:    $Backend$(if ($cudaTag) { " (CUDA $cudaTag)" })"
     if ($totalVramMB -gt 0) { Write-Host "   GPU VRAM:   $totalVramMB MB" }
@@ -352,7 +400,7 @@ if ($Choose -and -not $NonInteractive -and -not $DryRun) {
     Write-Host "   Variants: ptq1-mtp (6.23 GB), pq2-mtp (7.49 GB), q2-mtp (7.91 GB), ptq1, pq2, q2"
     $picked = Read-Host "Choose variant (Enter for $recommended)"
     if ($picked -and $picked.Trim() -ne "") {
-        $Variant = $picked.Trim().ToLowerInvariant()
+        $Variant = $picked.Trim().ToLowerInvariant().Replace("_0", "")
         if (-not $VARIANTS.ContainsKey($Variant)) {
             Write-Host "[ERR] Unknown variant '$Variant'." -ForegroundColor Red
             exit 1
@@ -372,14 +420,18 @@ $modelHint = $vInfo.Hint
 $hasMtp = $vInfo.HasMtp
 $mmprojFile = if ($NoVision) { "" } else { "Ternary-Bonsai-2.5-27B-mmproj-$MmprojQuant.gguf" }
 
-# ─── Resolve PrismML Release Tag & Assets ─────────────────────────────
+# --- Resolve PrismML Release Tag & Assets -----------------------------
 $relTag = $PRISM_RELEASE
 if ($relTag -eq "latest") {
+    $prevProg = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
     try {
         $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/PrismML-Eng/llama.cpp/releases/latest" -Headers @{ "User-Agent" = "bonsai-runner2" } -TimeoutSec 10
         if ($rel.tag_name) { $relTag = $rel.tag_name } else { $relTag = $DEFAULT_RELEASE }
     } catch {
         $relTag = $DEFAULT_RELEASE
+    } finally {
+        $ProgressPreference = $prevProg
     }
 }
 
@@ -405,29 +457,45 @@ function Get-AssetNames($be, $cTag, $arch, $tag) {
 
 $assets = Get-AssetNames $Backend $cudaTag $archSuffix $relTag
 $effCtx = $ContextSize
-if ($Backend -eq "cuda" -and $totalVramMB -gt 0 -and $totalVramMB -le 9000) {
+$effNgl = $Ngl
+
+if ($Backend -eq "cuda" -and $totalVramMB -gt 0 -and $totalVramMB -le 6800) {
+    if ($effCtx -eq 0) { $effCtx = 16384 }
+    if (-not $userSetMmprojCpu) { $MmprojCpu = $true }
+    if (-not $userSetKv4) { $Kv4 = $true }
+    if (-not $userSetNgl) { $effNgl = "auto" }
+} elseif ($Backend -eq "cuda" -and $totalVramMB -gt 0 -and $totalVramMB -le 9500) {
     if ($effCtx -eq 0) { $effCtx = 16384 }
     if (-not $userSetMmprojCpu) { $MmprojCpu = $true }
     if (-not $userSetKv4) { $Kv4 = $true }
 } elseif ($Backend -notin @("cuda", "hip") -and $totalRamMB -gt 0 -and $totalRamMB -lt 12000) {
     if ($effCtx -eq 0) { $effCtx = 8192 }
     if (-not $userSetKv4) { $Kv4 = $true }
+} elseif ($Backend -notin @("cuda", "hip") -and $totalRamMB -ge 12000 -and $totalRamMB -lt 20000) {
+    if ($effCtx -eq 0) { $effCtx = 16384 }
 }
 if ($effCtx -eq 0) { $effCtx = 32768 }
-$effNgl = if ($Backend -eq "cpu") { 0 } else { $Ngl }
+if ($Backend -eq "cpu") { $effNgl = "0" }
 
-$mtpEnabled = $false
-if ($hasMtp -and $Mtp -ne "off") {
-    # Verified +63% decode on Radeon 890M Vulkan (8.32 -> 13.56 t/s with n-max=1 on PQ2_0; 14.45 t/s with n-max=2 on PTQ1_0)
-    if ($Mtp -eq "on" -or $Backend -in @("cuda", "hip", "vulkan")) {
-        $mtpEnabled = $true
+function Resolve-MtpSettings($be, $varName) {
+    $en = $false
+    if ($hasMtp -and $Mtp -ne "off") {
+        if ($Mtp -eq "on" -or $be -in @("cuda", "hip", "vulkan")) {
+            $en = $true
+        }
     }
+    $defN = if ($be -eq "vulkan") {
+        if ($varName -eq "ptq1-mtp") { "2" } else { "1" }
+    } else { "3" }
+    $nmax = if ($env:MTP_NMAX) { $env:MTP_NMAX } else { $defN }
+    $pmin = if ($env:MTP_PMIN) { $env:MTP_PMIN } else { "0.1" }
+    return @{ Enabled = $en; Nmax = $nmax; Pmin = $pmin }
 }
-$defaultNmax = if ($Backend -eq "vulkan") {
-    if ($Variant -eq "ptq1-mtp") { "2" } else { "1" }
-} else { "3" }
-$effMtpNmax = if ($env:MTP_NMAX) { $env:MTP_NMAX } else { $defaultNmax }
-$effMtpPmin = if ($env:MTP_PMIN) { $env:MTP_PMIN } else { "0.1" }
+
+$mtpCfg = Resolve-MtpSettings $Backend $Variant
+$mtpEnabled = $mtpCfg.Enabled
+$effMtpNmax = $mtpCfg.Nmax
+$effMtpPmin = $mtpCfg.Pmin
 
 if ($DryRun) {
     Write-Host "DRY_RUN_PLAN:"
@@ -480,26 +548,66 @@ Write-Host "==========================================================" -Foregro
 
 New-Item -ItemType Directory -Force -Path $modelsDir, $binRoot, $dlDir | Out-Null
 
-# ─── Helper: Download with curl.exe (atomic .part) ────────────────────
+# --- Helper: Fast zip extraction & resilient curl.exe download --------
+function Expand-ZipFast($zipFile, $destDir) {
+    $prevProg = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
+    try {
+        Expand-Archive -Path $zipFile -DestinationPath $destDir -Force
+    } finally {
+        $ProgressPreference = $prevProg
+    }
+}
+
 function Download-Url($url, $dest) {
     $parent = Split-Path -Parent $dest
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
     $part = "$dest.part"
-    $curlArgs = @("-L", "--fail", "--retry", "3", "--retry-delay", "2", "-C", "-", "-o", $part)
-    if ($env:HF_TOKEN -and $url -like "*huggingface.co*") {
-        $curlArgs += @("-H", "Authorization: Bearer $($env:HF_TOKEN)")
+
+    $curlBin = "curl.exe"
+    if ($env:SystemRoot -and (Test-Path (Join-Path $env:SystemRoot "System32\curl.exe"))) {
+        $curlBin = Join-Path $env:SystemRoot "System32\curl.exe"
     }
-    $curlArgs += $url
-    & curl.exe @curlArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Download failed (exit $LASTEXITCODE): $url"
+
+    if (Get-Command $curlBin -ErrorAction SilentlyContinue) {
+        $curlArgs = @("-L", "--fail", "--retry", "3", "--retry-delay", "2", "-C", "-", "-o", $part)
+        if ($env:HF_TOKEN -and $url -like "*huggingface.co*") {
+            $curlArgs += @("-H", "Authorization: Bearer $($env:HF_TOKEN)")
+        }
+        $curlArgs += $url
+        & $curlBin @curlArgs
+        if ($LASTEXITCODE -ne 0 -and (Test-Path $part)) {
+            Write-Host "   Retrying clean download without stale partial file..." -ForegroundColor Yellow
+            Remove-Item -Force -Path $part -ErrorAction SilentlyContinue
+            $cleanArgs = @("-L", "--fail", "--retry", "3", "--retry-delay", "2", "-o", $part)
+            if ($env:HF_TOKEN -and $url -like "*huggingface.co*") {
+                $cleanArgs += @("-H", "Authorization: Bearer $($env:HF_TOKEN)")
+            }
+            $cleanArgs += $url
+            & $curlBin @cleanArgs
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "Download failed (exit $LASTEXITCODE): $url"
+        }
+    } else {
+        $prevProg = $ProgressPreference
+        $ProgressPreference = "SilentlyContinue"
+        try {
+            $headers = @{}
+            if ($env:HF_TOKEN -and $url -like "*huggingface.co*") {
+                $headers["Authorization"] = "Bearer $($env:HF_TOKEN)"
+            }
+            Invoke-WebRequest -Uri $url -OutFile $part -Headers $headers -UseBasicParsing
+        } finally {
+            $ProgressPreference = $prevProg
+        }
     }
     Move-Item -Force -Path $part -Destination $dest
 }
 
 function Ensure-PrismBinary($be, $cTag) {
     $a = Get-AssetNames $be $cTag $archSuffix $relTag
-    $stamp = if ($be -eq "cuda") { "$relTag-cuda-$cTag" } else { "$relTag-$be" }
+    $stamp = if ($be -eq "cuda") { "$relTag-cuda-$cTag-$archSuffix" } else { "$relTag-$be-$archSuffix" }
     $binDir = Join-Path $binRoot $stamp
     $found = $null
     if (Test-Path $binDir) {
@@ -512,7 +620,21 @@ function Ensure-PrismBinary($be, $cTag) {
         Download-Url $url $zipPath
         New-Item -ItemType Directory -Force -Path $binDir | Out-Null
         Write-Host "   Extracting $($a.Main) ..."
-        Expand-Archive -Path $zipPath -DestinationPath $binDir -Force
+        Expand-ZipFast $zipPath $binDir
+
+        # Some GPU archives (e.g. win-cuda-13.4-arm64.zip, win-sycl-x64.zip) ship only the backend DLL
+        # and overlay on top of the matching win-cpu-<arch>.zip base package.
+        $found = Get-ChildItem -Path $binDir -Recurse -Filter "llama-server.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $found -and $be -ne "cpu") {
+            $cpuAsset = "llama-$relTag-bin-win-cpu-$archSuffix.zip"
+            $cpuZip = Join-Path $dlDir $cpuAsset
+            Write-Host "   Fetching base runtime binaries ($cpuAsset) ..."
+            Download-Url "https://github.com/PrismML-Eng/llama.cpp/releases/download/$relTag/$cpuAsset" $cpuZip
+            Expand-ZipFast $cpuZip $binDir
+            Remove-Item -Force -Path $cpuZip -ErrorAction SilentlyContinue
+            # Re-extract the GPU archive on top so backend-specific files always take precedence
+            Expand-ZipFast $zipPath $binDir
+        }
         Remove-Item -Force -Path $zipPath -ErrorAction SilentlyContinue
 
         if ($a.Cudart -ne "") {
@@ -521,7 +643,10 @@ function Ensure-PrismBinary($be, $cTag) {
             Write-Host "   Downloading CUDA runtime DLLs ($($a.Cudart)) ..."
             try {
                 Download-Url $dllUrl $dllZip
-                Expand-Archive -Path $dllZip -DestinationPath $binDir -Force
+                $targetDllDir = $binDir
+                $srvCandidate = Get-ChildItem -Path $binDir -Recurse -Filter "llama-server.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($srvCandidate) { $targetDllDir = $srvCandidate.DirectoryName }
+                Expand-ZipFast $dllZip $targetDllDir
                 Remove-Item -Force -Path $dllZip -ErrorAction SilentlyContinue
             } catch {
                 Write-Host "[WARN] Could not download CUDA runtime DLLs; system CUDA toolkit will be required." -ForegroundColor Yellow
@@ -529,16 +654,6 @@ function Ensure-PrismBinary($be, $cTag) {
         }
 
         $found = Get-ChildItem -Path $binDir -Recurse -Filter "llama-server.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $found -and $be -eq "vulkan") {
-            # Safety fallback if a future vulkan archive only contains ggml-vulkan.dll
-            $cpuAsset = "llama-$relTag-bin-win-cpu-$archSuffix.zip"
-            $cpuZip = Join-Path $dlDir $cpuAsset
-            Write-Host "   Overlaying CPU base binaries ($cpuAsset) ..."
-            Download-Url "https://github.com/PrismML-Eng/llama.cpp/releases/download/$relTag/$cpuAsset" $cpuZip
-            Expand-Archive -Path $cpuZip -DestinationPath $binDir -Force
-            Remove-Item -Force -Path $cpuZip -ErrorAction SilentlyContinue
-            $found = Get-ChildItem -Path $binDir -Recurse -Filter "llama-server.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        }
     } else {
         Write-Host "   [OK] Using cached binary: $($found.FullName)" -ForegroundColor Green
     }
@@ -549,27 +664,47 @@ function Ensure-PrismBinary($be, $cTag) {
     return $found.FullName
 }
 
-function Test-ServerBinary($exePath) {
+function Test-ServerBinary($exePath, $requireGpuDevice) {
+    $exeDir = Split-Path -Parent $exePath
+    $prevPath = $env:Path
+    $env:Path = "$exeDir;$prevPath"
+    $outTxt = Join-Path ([System.IO.Path]::GetTempPath()) "bonsai25-ver-$PID.out.txt"
+    $errTxt = Join-Path ([System.IO.Path]::GetTempPath()) "bonsai25-ver-$PID.err.txt"
     try {
-        $proc = Start-Process -FilePath $exePath -ArgumentList @("--version") -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$env:TEMP\bonsai25-ver-out.txt" -RedirectStandardError "$env:TEMP\bonsai25-ver-err.txt"
-        return ($proc.ExitCode -eq 0)
+        $proc = Start-Process -FilePath $exePath -WorkingDirectory $exeDir -ArgumentList @("--version") -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $outTxt -RedirectStandardError $errTxt
+        if ($proc.ExitCode -ne 0) { return $false }
+        if ($requireGpuDevice) {
+            $devProc = Start-Process -FilePath $exePath -WorkingDirectory $exeDir -ArgumentList @("--list-devices") -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $outTxt -RedirectStandardError $errTxt
+            if ($devProc.ExitCode -eq 0 -and (Test-Path $outTxt)) {
+                $devOut = Get-Content -Path $outTxt -Raw -ErrorAction SilentlyContinue
+                if ($devOut -and $devOut.Contains("(none)")) { return $false }
+            }
+        }
+        return $true
     } catch {
         return $false
+    } finally {
+        $env:Path = $prevPath
+        Remove-Item -Force -Path $outTxt, $errTxt -ErrorAction SilentlyContinue
     }
 }
 
 Write-Host ""
 Write-Host "-- Step 1: Setting up PrismML llama.cpp ($relTag) --"
 $serverExe = Ensure-PrismBinary $Backend $cudaTag
-if (-not (Test-ServerBinary $serverExe)) {
+$checkGpuDev = ($backendAuto -and $Backend -eq "vulkan")
+if (-not (Test-ServerBinary $serverExe $checkGpuDev)) {
     if ($backendAuto -and $Backend -ne "cpu") {
-        Write-Host "[WARN] $Backend binary failed smoke test - falling back to CPU backend." -ForegroundColor Yellow
+        Write-Host "[WARN] $Backend backend unavailable or failed smoke test - falling back to CPU backend." -ForegroundColor Yellow
         $Backend = "cpu"
-        $effNgl = 0
-        $mtpEnabled = ($hasMtp -and $Mtp -eq "on")
+        $effNgl = "0"
+        $mtpCfg = Resolve-MtpSettings "cpu" $Variant
+        $mtpEnabled = $mtpCfg.Enabled
+        $effMtpNmax = $mtpCfg.Nmax
+        $effMtpPmin = $mtpCfg.Pmin
         $serverExe = Ensure-PrismBinary "cpu" ""
-        if (-not (Test-ServerBinary $serverExe)) {
-            Write-Host "[ERR] CPU binary also failed smoke test." -ForegroundColor Red
+        if (-not (Test-ServerBinary $serverExe $false)) {
+            Write-Host "[ERR] CPU binary also failed smoke test (install Microsoft VC++ 2015-2022 Redistributable x64/arm64 if missing)." -ForegroundColor Red
             exit 1
         }
     } else {
@@ -579,7 +714,7 @@ if (-not (Test-ServerBinary $serverExe)) {
 }
 Write-Host "   [OK] Runtime smoke test passed" -ForegroundColor Green
 
-# ─── Step 2: Download Model + Vision Projector ────────────────────────
+# --- Step 2: Download Model + Vision Projector ------------------------
 function Download-HfFile($file, $minBytes) {
     $dest = Join-Path $modelsDir $file
     if (Test-Path $dest) {
@@ -593,10 +728,9 @@ function Download-HfFile($file, $minBytes) {
         Remove-Item -Force -Path $dest
     }
 
-    # Check common local caches
     $cacheCandidates = @(
-        (Join-Path $HOME ".bonsai\models\$file"),
-        (Join-Path $HOME "models\$file"),
+        (Join-Path $homeDir ".bonsai\models\$file"),
+        (Join-Path $homeDir "models\$file"),
         (Join-Path $PSScriptRoot "models\$file")
     )
     foreach ($c in $cacheCandidates) {
@@ -632,7 +766,7 @@ if ($mmprojFile -ne "") {
     $mmprojPath = Download-HfFile $mmprojFile 10485760
 }
 
-# ─── Step 3: Port Fallback ────────────────────────────────────────────
+# --- Step 3: Port Fallback --------------------------------------------
 function Test-PortFree($p) {
     $c = New-Object System.Net.Sockets.TcpClient
     try {
@@ -661,7 +795,7 @@ if ($finalPort -ne $Port) {
     Write-Host "   Port $Port busy -> using port $finalPort"
 }
 
-# ─── Step 4: Assemble llama-server Arguments ──────────────────────────
+# --- Step 4: Assemble llama-server Arguments --------------------------
 $serverArgs = @(
     "-m", $modelPath,
     "--host", $HostAddr,
@@ -705,6 +839,8 @@ if ($mmprojPath -ne "") {
     $serverArgs += @("--mmproj", $mmprojPath)
     if ($MmprojCpu) { $serverArgs += "--no-mmproj-offload" }
     if ($ImageMaxTokens -gt 0) { $serverArgs += @("--image-max-tokens", "$ImageMaxTokens") }
+} else {
+    $serverArgs += "--no-mmproj"
 }
 
 if ($mtpEnabled) {
@@ -720,15 +856,19 @@ if ($Kv4) {
     $serverArgs += @("--cache-type-k", "q4_0", "--cache-type-v", "q4_0")
 }
 
-# ─── Step 5: Launch Server ────────────────────────────────────────────
+# --- Step 5: Launch Server --------------------------------------------
+$displayHost = if ($HostAddr -eq "0.0.0.0") { "localhost" } else { $HostAddr }
+$serverBinDir = Split-Path -Parent $serverExe
+$env:Path = "$serverBinDir;$env:Path"
+
 Write-Host ""
 Write-Host "-- Step 3: Starting llama-server --"
 Write-Host "   Binary:    $serverExe"
 Write-Host "   Model:     $modelPath"
 if ($mmprojPath -ne "") { Write-Host "   Vision:    $mmprojPath" }
 Write-Host "   Web UI:    http://localhost:$finalPort" -ForegroundColor Green
-Write-Host "   API:       http://$HostAddr`:$finalPort/v1/chat/completions"
-Write-Host "   Backend:   $Backend  Context: $effCtx tokens  Parallel: $Parallel"
+Write-Host "   API:       http://$displayHost`:$finalPort/v1/chat/completions"
+Write-Host "   Backend:   $Backend  GPU layers: $effNgl  Context: $effCtx tokens  Parallel: $Parallel"
 if ($mtpEnabled) { Write-Host "   MTP:       enabled (n-max=$effMtpNmax, p-min=$effMtpPmin)" }
 if ($Kv4)        { Write-Host "   KV Cache:  Q4_0 (4-bit)" }
 if ($MmprojCpu -and $mmprojPath -ne "") { Write-Host "   Vision RAM: projector kept in system RAM (--no-mmproj-offload)" }
@@ -736,7 +876,6 @@ Write-Host "   Test it:   powershell -ExecutionPolicy Bypass -File test-model.ps
 Write-Host "   Stop it:   Ctrl+C or powershell -ExecutionPolicy Bypass -File stop.ps1"
 Write-Host ""
 
-# Quote any argument with spaces or JSON quotes for Start-Process
 function Format-WinArg($s) {
     if ($s -match '[\s"]') {
         return '"' + ($s -replace '"', '\"') + '"'
@@ -748,26 +887,32 @@ $argLine = ($serverArgs | ForEach-Object { Format-WinArg $_ }) -join " "
 function Wait-And-OpenBrowser($portNum, $serverProc) {
     $url = "http://localhost:$portNum"
     Write-Host "   Waiting for model to finish loading..."
-    for ($i = 0; $i -lt 90; $i++) {
-        if ($serverProc.HasExited) { return }
-        try {
-            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$portNum/health" -TimeoutSec 2 -UseBasicParsing
-            if ($r.StatusCode -eq 200) {
-                Write-Host "   [OK] Server ready at $url" -ForegroundColor Green
-                if (-not $NoBrowser) {
-                    Write-Host "   Opening llama.cpp Chat UI in your browser..." -ForegroundColor Cyan
-                    try { Start-Process $url } catch {}
+    $prevProg = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
+    try {
+        for ($i = 0; $i -lt 90; $i++) {
+            if ($serverProc.HasExited) { return }
+            try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:$portNum/health" -TimeoutSec 2 -UseBasicParsing
+                if ($r.StatusCode -eq 200) {
+                    Write-Host "   [OK] Server ready at $url" -ForegroundColor Green
+                    if (-not $NoBrowser) {
+                        Write-Host "   Opening llama.cpp Chat UI in your browser..." -ForegroundColor Cyan
+                        try { Start-Process $url } catch {}
+                    }
+                    return
                 }
-                return
-            }
-        } catch {}
-        Start-Sleep -Seconds 1
+            } catch {}
+            Start-Sleep -Seconds 1
+        }
+    } finally {
+        $ProgressPreference = $prevProg
     }
 }
 
 if ($Detached) {
     $errLog = Join-Path $baseDir "llama-server.err.log"
-    $proc = Start-Process -FilePath $serverExe -ArgumentList $argLine -WindowStyle Hidden -RedirectStandardOutput $logFile -RedirectStandardError $errLog -PassThru
+    $proc = Start-Process -FilePath $serverExe -WorkingDirectory $serverBinDir -ArgumentList $argLine -WindowStyle Hidden -RedirectStandardOutput $logFile -RedirectStandardError $errLog -PassThru
     Set-Content -Path $pidFile -Value $proc.Id -Encoding ascii
     Write-Host "   PID: $($proc.Id) (saved to $pidFile)"
     Write-Host "   Logs: $logFile / $errLog"
@@ -775,7 +920,7 @@ if ($Detached) {
     exit 0
 }
 
-$proc = Start-Process -FilePath $serverExe -ArgumentList $argLine -NoNewWindow -PassThru
+$proc = Start-Process -FilePath $serverExe -WorkingDirectory $serverBinDir -ArgumentList $argLine -NoNewWindow -PassThru
 Set-Content -Path $pidFile -Value $proc.Id -Encoding ascii
 Write-Host "   PID: $($proc.Id) (saved to $pidFile)"
 Wait-And-OpenBrowser $finalPort $proc

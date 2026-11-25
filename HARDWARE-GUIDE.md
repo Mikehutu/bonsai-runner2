@@ -121,7 +121,7 @@ Mobile GPUs run slightly lower sustained clocks than desktop parts (~58% effecti
 | **AMD Radeon 8060S (Strix Halo)** | 64–128 GB UMA | 256 GB/s | `pq2-mtp` | 37.1 t/s | ~23 t/s | **~37 t/s** | Estimated | **262K** | **262K** |
 | **Intel Core Ultra iGPU (SYCL)** | 32 GB UMA | ~120 GB/s | `ptq1-mtp` | 21.0 t/s | **11.1 t/s** | **23.1 t/s** (`n=8`) | **Measured (PrismML)** | 12K–32K | 64K+ |
 
-> **6 GB VRAM laptops (e.g. RTX 3060 Laptop / RTX 4050 Laptop):** `PTQ1_0-mtp` is 5.81 GiB on disk, so full offload won't fit alongside KV cache. Use `NO_VISION=1 KV4=1 NGL=45 CONTEXT_SIZE=16384` to offload ~70% of layers to GPU and spill the rest to DDR5 RAM.
+> **6 GB VRAM laptops (e.g. RTX 3060 Laptop / RTX 4050 Laptop):** `PTQ1_0-mtp` is 5.81 GiB on disk, so full offload won't fit alongside KV cache. `start.sh` and `start.ps1` automatically set `-ngl auto`, `KV4=1`, `MMPROJ_CPU=1`, and 16K context on ≤6 GB VRAM cards so `llama-server` offloads the maximum layers that fit in free VRAM and spills the rest to DDR5 RAM (add `--no-vision` / `-NoVision` to save ~0.6 GB system RAM).
 
 ---
 
