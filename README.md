@@ -50,7 +50,7 @@ powershell -ExecutionPolicy Bypass -File start.ps1 -Variant ptq1-mtp
 powershell -ExecutionPolicy Bypass -File stop.ps1
 ```
 
-Then open **`http://localhost:8080`** in your browser for the built-in Web UI, or call `http://localhost:8080/v1/chat/completions` from any OpenAI-compatible tool or agent.
+Once the model finishes loading, the built-in **llama.cpp Chat UI** automatically opens in your browser at **`http://localhost:8080`** (skip with `-NoBrowser` / `NO_BROWSER=1`), and the OpenAI-compatible API is live at `http://localhost:8080/v1/chat/completions`.
 
 ### How Auto-Selection Works
 

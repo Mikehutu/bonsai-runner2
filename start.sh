@@ -100,6 +100,7 @@ MMPROJ_QUANT="${MMPROJ_QUANT:-Q8_0}"  # Q8_0 (0.63 GB) | BF16 (0.93 GB)
 MMPROJ_CPU="${MMPROJ_CPU:-0}"         # 1 = keep vision projector in RAM (--no-mmproj-offload)
 IMAGE_MAX_TOKENS="${IMAGE_MAX_TOKENS:-1024}"  # 0 = uncapped
 KV4="${KV4:-0}"                       # 1 = 4-bit KV cache (--cache-type-k q4_0 --cache-type-v q4_0)
+NO_BROWSER="${NO_BROWSER:-0}"         # 1 = do not auto-open Chat UI in browser
 BACKEND_OVERRIDE="${BACKEND:-${BONSAI_BACKEND:-}}"
 BUILD_FROM_SOURCE="${BUILD_FROM_SOURCE:-0}"
 NON_INTERACTIVE="${NON_INTERACTIVE:-0}"
@@ -1091,6 +1092,30 @@ trap cleanup INT TERM
 SERVER_PID=$!
 echo "${SERVER_PID}" > "${PID_FILE}"
 echo "   PID: ${SERVER_PID} (saved to ${PID_FILE})"
+
+# Auto-open built-in llama.cpp Chat UI on desktop sessions once /health is ready
+if [[ "${NO_BROWSER}" != "1" && -z "${SSH_CONNECTION:-}" ]]; then
+  (
+    ui_url="http://localhost:${FINAL_PORT}"
+    i=0
+    while [[ $i -lt 90 ]]; do
+      kill -0 "${SERVER_PID}" 2>/dev/null || exit 0
+      if command -v curl >/dev/null 2>&1; then
+        code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "http://127.0.0.1:${FINAL_PORT}/health" 2>/dev/null || echo 000)"
+        if [[ "${code}" == "200" ]]; then
+          if [[ "${OS_NAME}" == "Darwin" ]] && command -v open >/dev/null 2>&1; then
+            open "${ui_url}" >/dev/null 2>&1 || true
+          elif [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]] && command -v xdg-open >/dev/null 2>&1; then
+            xdg-open "${ui_url}" >/dev/null 2>&1 || true
+          fi
+          exit 0
+        fi
+      fi
+      sleep 1
+      i=$((i + 1))
+    done
+  ) &
+fi
 
 wait "${SERVER_PID}"
 EXIT_CODE=$?

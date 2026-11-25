@@ -25,6 +25,7 @@ param(
     [switch]$MmprojCpu,
     [switch]$Kv4,
     [switch]$Choose,
+    [switch]$NoBrowser,
     [switch]$Detached,
     [switch]$NonInteractive,
     [switch]$DryRun,
@@ -83,6 +84,8 @@ if ($Help -or $Variant -in @("-h", "--help", "help")) {
     Write-Host "  -MmprojCpu            Keep vision projector in RAM (--no-mmproj-offload)"
     Write-Host "  -ImageMaxTokens <N>   Max vision tokens (default: 1024; 0 = uncapped)"
     Write-Host "  -Kv4                  Enable 4-bit KV cache (q4_0)"
+    Write-Host "  -Choose               Interactive variant menu"
+    Write-Host "  -NoBrowser            Do not auto-open the Web UI in your browser"
     Write-Host "  -Detached             Run llama-server in background (logs to ~/.bonsai25/llama-server.log)"
     Write-Host "  -DryRun               Print resolved plan and exit without downloading"
     Write-Host ""
@@ -132,6 +135,7 @@ $userSetKv4       = $Kv4.IsPresent       -or ($null -ne $env:KV4)
 if (-not $NoVision -and $env:NO_VISION -eq "1") { $NoVision = $true }
 if (-not $MmprojCpu -and $env:MMPROJ_CPU -eq "1") { $MmprojCpu = $true }
 if (-not $Kv4 -and $env:KV4 -eq "1") { $Kv4 = $true }
+if (-not $NoBrowser -and $env:NO_BROWSER -eq "1") { $NoBrowser = $true }
 if (-not $DryRun -and $env:BONSAI_DRY_RUN -eq "1") { $DryRun = $true }
 
 $Variant = $Variant.ToLowerInvariant()
@@ -724,18 +728,40 @@ function Format-WinArg($s) {
 }
 $argLine = ($serverArgs | ForEach-Object { Format-WinArg $_ }) -join " "
 
+function Wait-And-OpenBrowser($portNum, $serverProc) {
+    $url = "http://localhost:$portNum"
+    Write-Host "   Waiting for model to finish loading..."
+    for ($i = 0; $i -lt 90; $i++) {
+        if ($serverProc.HasExited) { return }
+        try {
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$portNum/health" -TimeoutSec 2 -UseBasicParsing
+            if ($r.StatusCode -eq 200) {
+                Write-Host "   [OK] Server ready at $url" -ForegroundColor Green
+                if (-not $NoBrowser) {
+                    Write-Host "   Opening llama.cpp Chat UI in your browser..." -ForegroundColor Cyan
+                    try { Start-Process $url } catch {}
+                }
+                return
+            }
+        } catch {}
+        Start-Sleep -Seconds 1
+    }
+}
+
 if ($Detached) {
     $errLog = Join-Path $baseDir "llama-server.err.log"
     $proc = Start-Process -FilePath $serverExe -ArgumentList $argLine -WindowStyle Hidden -RedirectStandardOutput $logFile -RedirectStandardError $errLog -PassThru
     Set-Content -Path $pidFile -Value $proc.Id -Encoding ascii
     Write-Host "   PID: $($proc.Id) (saved to $pidFile)"
     Write-Host "   Logs: $logFile / $errLog"
+    Wait-And-OpenBrowser $finalPort $proc
     exit 0
 }
 
 $proc = Start-Process -FilePath $serverExe -ArgumentList $argLine -NoNewWindow -PassThru
 Set-Content -Path $pidFile -Value $proc.Id -Encoding ascii
 Write-Host "   PID: $($proc.Id) (saved to $pidFile)"
+Wait-And-OpenBrowser $finalPort $proc
 try {
     $proc.WaitForExit()
     $code = $proc.ExitCode
